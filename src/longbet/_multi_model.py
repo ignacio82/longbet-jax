@@ -129,7 +129,7 @@ class LongBetMultiPrediction:
 
 
 class LongBetMulti:
-    """Experimental coupled trees for multiple continuous and binary outcomes.
+    """Coupled trees for multiple continuous and binary outcomes.
 
     Fits separate prognostic and treatment forests per outcome on a shared
     panel, using the full precision of an identified triangular SUR likelihood.

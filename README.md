@@ -176,7 +176,7 @@ asserts that equality exactly.
 
 ---
 
-## Multiple Outcomes (Experimental Full-Precision SUR)
+## Multiple Outcomes (Full-Precision SUR)
 
 LongBet supports joint estimation of multiple continuous and binary outcomes on a shared panel using full-precision triangular Seemingly Unrelated Regressions (`sampler_semantics="full_precision_sur_v1"`):
 
@@ -279,7 +279,7 @@ fit <- readRDS("multi_fit.rds")
 
 ### Opt-in shared treatment partitions
 
-An experimental shared/private extension pools evidence about **where treatment
+An opt-in shared/private extension pools evidence about **where treatment
 effects differ**, while allowing a different leaf value and sign for every
 outcome. Prognostic forests, exposure GPs, coding scales and unit intercepts
 remain outcome-specific. For example:
@@ -326,7 +326,7 @@ new public defaults or a validated chapter configuration.
 
 - **Full-precision semantics:** With raw residuals $r$, $B=I-\Gamma$, and structural innovation variances $v$, mean updates use $\Omega=B^T\operatorname{diag}(1/v)B$. Outcome $m$ receives conditional residual $(\Omega r)_m/\Omega_{mm}$ and precision $\Omega_{mm}$; these weights enter both forests, the GP, coding scales and unit intercepts. Binary latent draws use the corresponding truncated Gaussian, whose conditional variance need not be one. Variance updates use structural innovations $Br$, not conditional pseudo-residuals. Supported missing masks use cell-specific observed-equation precisions.
 - **What is shared:** By default, only the residual likelihood couples outcomes; the opt-in extension above also shares some treatment partitions. Outcome-specific GPs and leaf values allow different magnitudes and opposite signs. This is an adaptation within LongBet, not a replacement by mvbcf. The triangular covariance prior can depend on outcome order; multiple binary outcomes have independent marginal latent errors under the current identification restriction.
-- **Validation status:** Treat coupled fits as experimental. Analytical tests check actual forest draws against known Gaussian posterior means and covariances, scalar dynamic weights, and binary conditional moments. Shared-path tests also check enumerated tree-posterior frequencies, mixed observed-data quadrature, and the shared/private rescaling move. These checks do not establish convergence or repeated-simulation calibration for arbitrary panels. Check the actual probability-scale effects, subgroup averages, and decision events, not only latent-scale ATT. If diagnostics fail, do not use the probabilities for decisions. Separate fits remain the baseline; joint fitting need not improve them.
+- **Validation status:** Analytical tests check actual forest draws against known Gaussian posterior means and covariances, scalar dynamic weights, and binary conditional moments. Shared-path tests also check enumerated tree-posterior frequencies, mixed observed-data quadrature, and the shared/private rescaling move. These checks do not establish convergence or repeated-simulation calibration for arbitrary panels. Check the actual probability-scale effects, subgroup averages, and decision events, not only latent-scale ATT. If diagnostics fail, do not use the probabilities for decisions. Separate fits remain the baseline; joint fitting need not improve them.
 - **Chapter benchmark:** The [same-data review and reproduction scripts](benchmarks/multi_outcome_review.md) record longer runs, fixed-coding sensitivity checks, and a comparison with the original C++ implementation. Accurate-looking means did not establish convergence; unsuccessful trials are retained in the report rather than promoted to new defaults.
 - **Missingness Policy:** With active SUR, every observed downstream continuous cell needs all its predecessor outcomes observed. Complete, common-mask, and appropriately nested masks are supported; arbitrary missing predecessors are rejected. With `sur = FALSE` or `sur_prior_var = 0`, arbitrary cell missingness is supported across equations.
 - **Memory Bounding:** `summary_only = TRUE` predicts blockwise over panel cells without ever building `(N, T, draws)` arrays in memory. Note that `joint_prob` requires full draws (`summary_only = FALSE`) because joint event probabilities across outcomes cannot be computed from marginal summary statistics.

@@ -5,8 +5,7 @@
 #' likelihood (`full_precision_sur_v1`). Downstream observations inform earlier
 #' means and binary latent responses. Binary equations come first, with zero
 #' incoming loadings and unit marginal latent variance; complete or appropriately
-#' nested observation masks are required when coupling is active.
-#' Coupled fits remain experimental: aligned draws do not establish calibrated
+#' Note: aligned draws do not establish calibrated
 #' joint inference. By default treatment trees are outcome-specific. Set
 #' `num_shared_trees > 0` to share that many treatment partitions with vector
 #' leaves, retaining private treatment trees (`shared_private_sur_v1`).
