@@ -1,0 +1,484 @@
+# Shared API contract between the Python engine and the R front door.
+#
+# The failure mode for a package with two front doors is silent drift: an
+# argument renamed on one side, a default changed on the other, and two
+# languages quietly fitting different models. This file is the single source of
+# truth, and it is checked from both sides:
+#
+#   * tests/test_contract.py asserts every entry matches LongBetConfig, and --
+#     in the other direction -- that every LongBetConfig field appears here or
+#     is listed under `internal`.
+#   * tests/testthat/test-contract.R asserts formals(longbet) matches the
+#     r_name and default of every entry with `expose_in_r: true`.
+#
+# Adding a configuration option without touching this file fails the Python
+# test; exposing it in R with a different default fails the R test.
+version: "2.1.0"
+
+# Config fields that are deliberately not part of the user-facing contract.
+internal:
+  - sample_beta   # switches off the GP draw; used only by the BCF reduction test
+
+arguments:
+  # -- sampler ---------------------------------------------------------------
+  - python_name: num_sweeps
+    r_name: num_sweeps
+    type: integer
+    default: 250
+    expose_in_r: true
+    description: Number of posterior draws saved per chain, after burn-in.
+  - python_name: num_burnin
+    r_name: num_burnin
+    type: integer
+    default: 2000
+    expose_in_r: true
+    description: >-
+      Number of burn-in iterations discarded. Larger than num_sweeps on purpose:
+      burn-in, not draw count, governs whether the chains have converged.
+  - python_name: n_skip
+    r_name: n_skip
+    type: integer
+    default: 2
+    expose_in_r: true
+    description: >-
+      Thinning interval; 1 saves every post-burn-in iteration. Thinning buys
+      effective sample size almost free, because prediction cost scales with
+      retained draws while sampling does not.
+  - python_name: num_chains
+    r_name: num_chains
+    type: integer
+    default: 4
+    expose_in_r: true
+    description: Number of parallel MCMC chains. At least 2 are needed for R-hat.
+  - python_name: inner_loop_length
+    r_name: inner_loop_length
+    type: integer_or_null
+    default: null
+    expose_in_r: true
+    description: Sweeps per dispatch; bounds compile time. NULL runs one dispatch.
+
+  # -- forests ---------------------------------------------------------------
+  - python_name: num_trees_pr
+    r_name: num_trees_pr
+    type: integer
+    default: 20
+    expose_in_r: true
+    description: Number of trees in the prognostic forest.
+  - python_name: num_trees_trt
+    r_name: num_trees_trt
+    type: integer
+    default: 20
+    expose_in_r: true
+    description: Number of trees in the treatment forest.
+  - python_name: min_points_per_leaf_pr
+    r_name: min_points_per_leaf_pr
+    type: integer
+    default: 10
+    expose_in_r: true
+    description: Minimum observations per leaf, prognostic forest.
+  - python_name: min_points_per_leaf_trt
+    r_name: min_points_per_leaf_trt
+    type: integer
+    default: 10
+    expose_in_r: true
+    description: Minimum observations per leaf, treatment forest.
+  - python_name: max_depth_pr
+    r_name: max_depth_pr
+    type: integer
+    default: 10
+    expose_in_r: true
+    description: Maximum tree depth, prognostic forest.
+  - python_name: max_depth_trt
+    r_name: max_depth_trt
+    type: integer
+    default: 10
+    expose_in_r: true
+    description: Maximum tree depth, treatment forest.
+  - python_name: alpha_split_pr
+    r_name: alpha_split_pr
+    type: float
+    default: 0.95
+    expose_in_r: true
+    description: Tree-depth prior alpha, prognostic forest.
+  - python_name: beta_split_pr
+    r_name: beta_split_pr
+    type: float
+    default: 2.0
+    expose_in_r: true
+    description: Tree-depth prior beta, prognostic forest.
+  - python_name: alpha_split_trt
+    r_name: alpha_split_trt
+    type: float
+    default: 0.25
+    expose_in_r: true
+    description: Tree-depth prior alpha, treatment forest.
+  - python_name: beta_split_trt
+    r_name: beta_split_trt
+    type: float
+    default: 3.0
+    expose_in_r: true
+    description: Tree-depth prior beta, treatment forest.
+  - python_name: num_cutpoints
+    r_name: num_cutpoints
+    type: integer
+    default: 100
+    expose_in_r: true
+    description: Maximum quantile bins per continuous covariate.
+
+  # -- exposure trajectory ---------------------------------------------------
+  - python_name: sig_knl
+    r_name: sig_knl
+    type: float
+    default: 1.0
+    expose_in_r: true
+    description: Kernel standard deviation for the exposure trajectory.
+  - python_name: lambda_knl
+    r_name: lambda_knl
+    type: float
+    default: 1.0
+    expose_in_r: true
+    description: Kernel lengthscale over the exposure index.
+  - python_name: kernel_type
+    r_name: kernel_type
+    type: string
+    default: "se"
+    expose_in_r: true
+    description: Kernel family; one of se, matern32, matern52, ar1.
+  - python_name: gp_jitter
+    r_name: gp_jitter
+    type: float
+    default: 1.0e-6
+    expose_in_r: true
+    description: Relative diagonal jitter on the kernel.
+  - python_name: sigma_m
+    r_name: sigma_m
+    type: float
+    default: 1.0
+    expose_in_r: true
+    description: Prior standard deviation of the marginalized constant GP mean.
+  - python_name: gp_constant_mean
+    r_name: gp_constant_mean
+    type: boolean
+    default: true
+    expose_in_r: true
+    description: Whether the GP reverts to an estimated common level.
+
+  # -- structure -------------------------------------------------------------
+  - python_name: split_time_ps
+    r_name: split_time_ps
+    type: boolean
+    default: true
+    expose_in_r: true
+    description: Whether the prognostic forest may split on calendar time.
+  - python_name: split_time_trt
+    r_name: split_time_trt
+    type: boolean
+    default: true
+    expose_in_r: true
+    description: Whether the treatment forest may split on the exposure index.
+
+  # -- priors ----------------------------------------------------------------
+  - python_name: random_intercept
+    r_name: random_intercept
+    type: boolean
+    default: true
+    expose_in_r: true
+    description: Whether to fit unit-level random intercepts.
+  - python_name: gamma_prior_a
+    r_name: gamma_prior_a
+    type: float
+    default: 1.0
+    expose_in_r: true
+    description: Inverse-gamma shape for the unit-intercept variance.
+  - python_name: gamma_prior_b
+    r_name: gamma_prior_b
+    type: float
+    default: 0.1
+    expose_in_r: true
+    description: Inverse-gamma scale for the unit-intercept variance.
+  - python_name: sigma_prior_a
+    r_name: sigma_prior_a
+    type: float
+    default: 0.0
+    expose_in_r: true
+    description: Inverse-gamma shape for the error variance; 0 is the reference prior.
+  - python_name: sigma_prior_b
+    r_name: sigma_prior_b
+    type: float
+    default: 0.0
+    expose_in_r: true
+    description: Inverse-gamma scale for the error variance.
+  - python_name: sigma_b
+    r_name: sigma_b
+    type: float
+    default: 0.7071067811865476
+    expose_in_r: true
+    description: Prior standard deviation of the adaptive coding weights.
+  - python_name: sigma_alpha
+    r_name: sigma_alpha
+    type: float
+    default: 1.0
+    expose_in_r: true
+    description: Prior standard deviation of the prognostic scale.
+
+  # -- outcome and moves -----------------------------------------------------
+  - python_name: outcome
+    r_name: outcome
+    type: string
+    default: "continuous"
+    expose_in_r: true
+    description: Outcome type, continuous or binary (probit).
+  - python_name: sample_alpha
+    r_name: a_scaling
+    type: boolean
+    default: false
+    expose_in_r: true
+    description: Whether to sample the prognostic scale alpha.
+  - python_name: adaptive_coding
+    r_name: b_scaling
+    type: boolean
+    default: true
+    expose_in_r: true
+    description: >-
+      Whether to sample the adaptive coding weights b0, b1. On by default: this
+      is an exactly conjugate move along the global scale of the treatment term
+      and one of the two mechanisms that traverse the beta-nu ridge.
+  - python_name: ridge_move
+    r_name: ridge_move
+    type: boolean
+    default: true
+    expose_in_r: true
+    description: Whether to run the Metropolis move along the beta-nu scale ridge.
+  - python_name: ridge_proposal_sigma
+    r_name: ridge_proposal_sigma
+    type: float
+    default: 0.2
+    expose_in_r: true
+    description: Proposal standard deviation for log c in the ridge move.
+  - python_name: standardize
+    r_name: standardize
+    type: boolean
+    default: true
+    expose_in_r: true
+    description: Whether to centre and scale a continuous outcome internally.
+  - python_name: random_seed
+    r_name: random_seed
+    type: integer
+    default: 0
+    expose_in_r: true
+    description: Base PRNG seed.
+  - python_name: device
+    r_name: device
+    type: string
+    default: "auto"
+    expose_in_r: true
+    description: Compute device; auto, cpu or gpu.
+  # -- multi / SUR -----------------------------------------------------------
+  - python_name: sur
+    r_name: sur
+    type: boolean
+    default: true
+    expose_in_r: true
+    description: >-
+      Whether to use full-precision triangular SUR coupling across outcomes.
+      Inert for single-outcome models.
+  - python_name: sur_prior_var
+    r_name: sur_prior_var
+    type: float
+    default: 1.0
+    expose_in_r: true
+    description: >-
+      Prior variance on SUR regression loadings Gamma. 0 disables SUR.
+      Inert for single-outcome models.
+
+  - python_name: num_shared_trees
+    r_name: num_shared_trees
+    type: integer
+    default: 0
+    expose_in_r: true
+    description: >-
+      Shared treatment partitions with vector leaves. Replaces this many of
+      num_trees_trt, leaving at least one private tree per outcome. Zero disables
+      sharing. Nonzero values require LongBetMulti / longbet_multi.
+  - python_name: shared_variance_fraction
+    r_name: shared_variance_fraction
+    type: float
+    default: 0.5
+    expose_in_r: true
+    description: >-
+      Fixed prior variance fraction for shared treatment trees, strictly between
+      0 and 1. The remainder belongs to private treatment trees; total forest
+      variance remains one. Inert without sharing. Not a learned correlation.
+
+# Arguments accepted by the R front door that are not sampler configuration.
+r_only_arguments:
+  - r_name: y
+    description: Outcome panel, N x T.
+  - r_name: x
+    description: Prognostic covariates, N x P.
+  - r_name: x_trt
+    description: Treatment covariates, N x P_trt. Defaults to x.
+  - r_name: z
+    description: Treatment indicator panel, N x T. Must be absorbing.
+  - r_name: t
+    description: Calendar time vector, length T.
+  - r_name: x_tv
+    description: Time-varying prognostic covariates, N x T x P.
+  - r_name: x_trt_tv
+    description: Time-varying treatment covariates, N x T x P.
+  - r_name: ps
+    description: Propensity score, length N or N x T. Prognostic forest only.
+  - r_name: verbose
+    description: Whether to print progress messages.
+
+return_fields:
+  fit:
+    - name: beta_values
+      shape: "(S_max + 1, draws)"
+      description: Exposure trajectory draws.
+    - name: gamma_draws
+      shape: "(N, draws)"
+      description: Unit random intercept draws.
+    - name: sigma_gamma_draws
+      shape: "(draws,)"
+      description: Unit-intercept variance draws.
+    - name: sigma0_draws
+      shape: "(1, draws)"
+      description: >-
+        Residual standard deviation in standardized outcome units; multiply by
+        sdy to recover the data scale.
+    - name: sdy
+      shape: "()"
+      description: Standard deviation used to scale the outcome.
+    - name: meany
+      shape: "()"
+      description: Mean used to centre the outcome.
+    - name: b0_draws
+      shape: "(draws,)"
+      description: Adaptive coding weight for control cells.
+    - name: b1_draws
+      shape: "(draws,)"
+      description: Adaptive coding weight for treated cells.
+    - name: alpha_draws
+      shape: "(draws,)"
+      description: Prognostic scale draws.
+    - name: random_intercept
+      shape: "()"
+      description: Whether unit random intercepts were fitted.
+    - name: raw_model
+      shape: "(bytes)"
+      description: Serialized engine state, so saveRDS round-trips without Python.
+  predict:
+    - name: tauhats
+      shape: "(N, T, draws)"
+      description: Treatment-effect draws; NULL when summary_only.
+    - name: muhats0
+      shape: "(N, T, draws)"
+      description: Untreated-outcome draws including the unit intercept.
+    - name: preds
+      shape: "(N, T, draws)"
+      description: Factual outcome draws.
+    - name: att_full
+      shape: "(S_max, draws)"
+      description: ATT draws by exposure time; present even under summary_only.
+    - name: tauhats.mean
+      shape: "(N, T)"
+      description: Posterior mean treatment effect per cell.
+    - name: tauhats.lower
+      shape: "(N, T)"
+      description: Lower credible bound per cell.
+    - name: tauhats.upper
+      shape: "(N, T)"
+      description: Upper credible bound per cell.
+  stability:
+    - name: summary
+      description: >-
+        One row with num_chains, num_draws, total_draws, ess_median, ess_min,
+        ess_tail_median, ess_tail_min, rhat_max, mcse_median, ess_ok, rhat_ok.
+        ess_ok requires finite bulk and tail ESS at every exposure. Mean MCSE
+        uses mean ESS. No reliability verdict is issued.
+    - name: by_exposure
+      description: Per-exposure ess_bulk, ess_tail, ess_mean, rhat and mean mcse.
+
+multi_api:
+  description: >-
+    Multiple continuous and binary outcomes on a shared panel using full-precision
+    triangular SUR, including downstream feedback into binary latent responses.
+    Prognostic forests remain outcome-specific. Optional shared treatment
+    partitions have vector leaves and regularized private components.
+  sampler_semantics: "full_precision_sur_v1"
+  shared_sampler_semantics: "shared_private_sur_v1"
+  shared_format_version: 2
+  shared_treatment_trace_layout: "private_then_shared"
+  precision_cache_version: 1
+  variance_prior_requirement: >-
+    Coupled fits (sur_active=true) containing continuous outcomes require
+    explicitly positive sigma_prior_a and sigma_prior_b on the working outcome
+    scale. Their improper reference prior is rejected at fit and archive load.
+    Scalar defaults, uncoupled fits and binary-only fits retain existing behavior.
+    Proper priors do not guarantee convergence.
+  inputs:
+    y:
+      python_types:
+        - "Mapping[str, np.ndarray (N, T)]"
+        - "Sequence[np.ndarray (N, T)]"
+        - "np.ndarray (N, T, M)"
+      r_types:
+        - "list of matrices [N x T]"
+        - "array [N x T x M]"
+      description: >-
+        Panel of M >= 2 outcomes. Unnamed elements generate outcome_1 .. outcome_M.
+        NA/NaN marks unobserved cells. Wholly unobserved outcomes are rejected.
+    outcome:
+      type: "string, Sequence[string], or Mapping[str, string]"
+      default: "continuous"
+      description: >-
+        Outcome type per outcome ('continuous' or 'binary'). Binary outcomes precede
+        continuous ones in internal sampling order and have zero incoming SUR loadings.
+    outcome_names:
+      type: "Sequence[str] or NULL"
+      description: Length-M unique nonempty outcome names.
+  fit_returns:
+    fits:
+      description: Child LongBet fits in user order.
+    outcome_names:
+      description: Outcome names in user order.
+    order:
+      description: 0-based (Python) or 1-based (R) indices mapping internal order to user order.
+    inverse_order:
+      description: Indices mapping user order to internal order.
+    sur_active:
+      description: Whether SUR coupling is active.
+    gamma_loadings:
+      shape: "(*chains, K, M, M) in Python; (M*M, D) in R"
+      description: >-
+        Strictly lower-triangular SUR loadings in internal outcome order with zero
+        diagonal, in working outcome units. Columns in R exclude burn-in.
+  predict_returns:
+    preds:
+      description: Child predictions in user order.
+    summary_only:
+      description: Whether full draws were suppressed to bound memory.
+  utilities:
+    effect_draws:
+      description: >-
+        Draws of treatment effects on the outcome scale (continuous: tauhats,
+        binary: norm.cdf(mu0+tau)-norm.cdf(mu0)), shape (N, T, D). Requires full draws.
+    joint_prob:
+      description: >-
+        Empirical joint probability across outcomes for user condition callables.
+        AND across outcomes, then mean over draws. cells=NULL returns (N, T);
+        boolean cells (N, T) returns length-N unit average over selected periods.
+    effect_draws_from_arrays:
+      description: >-
+        Shared Python/R array boundary for effect_draws; accepts full tauhats and
+        muhats0 arrays, validates identical nonempty (N,T,D) shapes, and performs
+        the same continuous/probit transformation without live prediction handles.
+    reduce_joint_masks:
+      description: >-
+        Shared Python/R reducer for logical (N,T,D) condition arrays. Rejects
+        empty or inconsistent draw axes; uses the same cells semantics as joint_prob.
+    outcome_correlation:
+      description: >-
+        Mean of per-draw implied innovation correlation matrices in user order,
+        shape (M, M), with unit diagonal and float64 precision.

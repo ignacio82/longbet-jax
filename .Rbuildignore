@@ -1,0 +1,14 @@
+^benchmarks$
+^contract$
+^Dockerfile.*$
+^\.git$
+^\.github$
+^\.gitignore$
+^longbet-jax\.Rproj$
+^__pycache__$
+^pyproject\.toml$
+^\.pytest_cache$
+^src$
+^tests/conftest\.py$
+^tests/test_.*\.py$
+^\.venv$
