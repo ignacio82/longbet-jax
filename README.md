@@ -65,6 +65,106 @@ The table carries an `exposure` column computed by the same code the sampler
 uses, so a picture of the rollout and the event-time axis of an ATT cannot
 disagree — which is the failure mode of writing this by hand.
 
+## Randomized encouragement
+
+For a **single encouragement wave randomized across individual units**, with a
+permanent control arm, LongBet now provides adoption diagnostics and a reference
+analysis without fitting a forest. `z` records encouragement and `d` actual
+adoption; both are complete, binary, absorbing `(N, T)` panels.
+
+```python
+from longbet import (
+    validate_encouragement, encouragement_summary,
+    encouragement_effects, plot_encouragement,
+)
+
+design = validate_encouragement(z, d, t)
+adoption = encouragement_summary(z, d, t)  # includes baseline periods
+effects = encouragement_effects(y, d, z, t, alpha=0.05)
+print(effects[["horizon", "itt_y", "itt_d", "wald", "wald_set_type",
+               "wald_lower_1", "wald_upper_1", "wald_lower_2", "wald_upper_2"]])
+plot_encouragement(z, d, t)                # optional matplotlib
+```
+
+```r
+design <- validate_encouragement(z, d, t)
+adoption <- encouragement_summary(z, d, t)
+effects <- encouragement_effects(y, d, z, t, alpha = 0.05)
+plot_encouragement(z, d, t)                 # optional ggplot2
+```
+
+The two ITTs are assigned-arm differences in outcome and adoption means, using
+the same study population. Binary outcomes give risk differences directly.
+`wald` is their signed ratio. Its confidence set inverts a studentized contrast
+of `Y - w*D` with a normal critical value, accounting for outcome/adoption
+covariance. This is **asymptotic pointwise inference**, not an exact permutation
+procedure or a posterior credible interval. Adequate arm sizes still matter.
+The [calibration report](benchmarks/encouragement/README.md) records
+undercoverage of the normal first-stage interval in a discrete zero-effect case.
+
+Read both interval components: a set can be bounded, disjoint, a half-line, all
+real numbers, a singleton, or empty. Infinite endpoints are preserved; unused
+components are missing. If either arm has fewer than two units, point estimates
+remain available but uncertainty is marked `unavailable`. Negative first stages
+are retained and a zero denominator gives a missing point ratio, with the
+confidence set still reported. Perfect compliance and experiments without
+baseline periods are supported.
+
+The inference assumes complete randomization across individual units; array
+validation cannot establish that assumption. For blocks, clusters, known
+assignment probabilities and independent staggered-cohort randomization, use
+`EncouragementDesign` with `design_encouragement_effects()` as described below.
+Incomplete panels and nonabsorbing adoption remain unsupported.
+Observed adoption lags do not identify compliance types. Calling the ratio CACE
+also requires exclusion, monotonicity, relevance, and adoption-history assumptions;
+encouragement that accelerates adoption can complicate that interpretation.
+
+The Bayesian wrapper fits both reduced forms jointly on encouragement and
+standardizes them over **all original study units**, including controls:
+
+```python
+from longbet import LongBetEncourage
+
+fit = LongBetEncourage(first_stage="lpm").fit(y, d, z, x, t=t)
+pred = fit.predict(groups=baseline_group, summary_only=True)
+print(pred.table)             # posterior ITTs, quantiles, support and diagnostics
+print(pred.wald())            # ratio withheld when ITT/ratio diagnostics fail
+print(pred.reference)         # separate reference confidence sets
+fit.save("encouragement.npz")
+```
+
+```r
+fit <- longbet_encourage(y, d, z, x, t = t, first_stage = "lpm")
+pred <- predict(fit, groups = baseline_group, summary_only = TRUE)
+pred$effects
+encouragement_wald(pred)
+pred$reference
+saveRDS(fit, "encouragement.rds")
+```
+
+Choose `first_stage="lpm"` or `"probit"` explicitly; there is **no validated
+default**. Binary outcomes use `outcome="binary"`, and binary contrasts are
+probability differences even with memory-bounded prediction. The wrapper uses
+proper innovation priors by default. It reports posterior medians and quantiles
+of the signed Wald ratio, never a default ratio mean or a trimmed denominator.
+
+Posterior interval calibration is **not established**: the benchmark compares
+joint/separate LPM/probit fits, longer chains and correlated-intercept candidates,
+and retains mixing and coverage failures. SUR couples innovations while the
+production unit-intercept priors remain independent across outcomes. A passing
+diagnostic alone does not validate a posterior ratio. A treatment-clock
+structural model remains outside this release under the plan's identification
+requirements.
+With binary Y and probit adoption, innovation loadings are fixed to zero in both
+equations; the default separate-forest posteriors are independent even when
+`sur=True`. This limitation is recorded in model metadata and calibration results.
+
+The [encouragement guide](docs/encouragement-guide.md) includes matching Python/R
+examples for subgroups, blocked and cluster targets, known probabilities,
+staggered cohorts, archive replay, and covariance-aware model/reference bootstrap
+comparisons. The [implementation record](docs/encouragement-implementation-plan.md)
+tracks scope and validation evidence.
+
 ## The estimand
 
 Under control the exposure index is $0$, not $S$, so both the multiplier *and*

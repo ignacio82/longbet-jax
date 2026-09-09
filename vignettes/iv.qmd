@@ -1,0 +1,587 @@
+---
+title: "LongBet: Randomized Encouragement Designs and Longitudinal Instrumental Variables"
+description: "Instrumental variables in longitudinal panels: intention-to-treat, complier dynamics, weak instruments, exact randomization inference, and adoption acceleration."
+author: "Ignacio Martinez"
+date: "2026-09-09"
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-tools: true
+    code-copy: true
+    css: longbet.css
+    self-contained: true
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+::: {.callout-note title="Longitudinal Instrumental Variables in the LongBet Suite"}
+This chapter explores the intersection of randomized encouragement designs and longitudinal panel data. It bridges the foundational concepts introduced in **[Randomized Encouragement Design](https://book.martinez.fyi/iv.html)** with the dynamic panel modeling machinery developed in **[LongBet: Dynamic Treatment Effects in Staggered Rollouts](https://book.martinez.fyi/longbet.html)**, **[LongBet: Decisions and Multiple Outcomes](https://book.martinez.fyi/longbet_decisions.html)**, and **[LongBet: Forecasting, Observational Panels, and Diagnostics](https://book.martinez.fyi/longbet_extensions.html)**.
+:::
+
+## Introduction: The Longitudinal Encouragement Problem
+
+In product development, growth engineering, and marketing, we face a fundamental constraint: **you cannot force users to adopt a behavior; you can only encourage them**. 
+
+You cannot force an enterprise team to integrate your new Slack automation workflow; you can only offer an onboarding concierge, an in-app banner, or a promotional credit. You cannot force a subscriber to download your mobile app; you can only send a push notification. When behavior cannot be directly randomized, we rely on a **Randomized Encouragement Design (RED)**, using the randomized nudge $Z$ as an **instrumental variable** for actual adoption $D$.
+
+In cross-sectional settings, the econometric toolbox is familiar: compute the Intention-to-Treat effect on outcomes ($\text{ITT}_y$), divide it by the Intention-to-Treat effect on adoption take-up ($\text{ITT}_d$), and call the resulting Wald ratio the **Complier Average Causal Effect (CACE)** or Local Average Treatment Effect (LATE):
+
+$$
+\text{CACE} = \frac{\mathbb{E}[Y \mid Z = 1] - \mathbb{E}[Y \mid Z = 0]}{\mathbb{E}[D \mid Z = 1] - \mathbb{E}[D \mid Z = 0]} = \frac{\text{ITT}_y}{\text{ITT}_d}
+$$
+
+However, modern digital products and enterprise platforms operate in **longitudinal time**. When an encouragement experiment unfolds across weeks or months, the cross-sectional intuition breaks down in three critical ways:
+
+1. **Adoption is an absorbing process across time**: Units do not simply adopt once in a vacuum. Some adopt immediately, some adopt late after word-of-mouth spreads, and some never adopt.
+2. **The Acceleration Trap**: Encouragement frequently does not create *new* adopters in the long run; instead, it **accelerates adoption timing**. If encouraged accounts adopt in week 2 while control accounts adopt in week 4, by week 4 *both groups have adopted* ($D_{i4}(1) = D_{i4}(0) = 1$). The static adoption difference collapses to zero ($\text{ITT}_d(4) = 0$), causing the standard Wald ratio to divide by zero and diverge, even though the encouraged teams enjoyed two extra weeks of feature exposure!
+3. **Weak-stage distortion in panel horizons**: In early periods or after adoption curves converge, the first stage $\text{ITT}_d(t)$ is small. Standard 2SLS normal confidence intervals severely undercover, and naive Bayesian posterior ratios exhibit Cauchy-like fat tails.
+
+LongBet addresses these challenges through a unified framework that combines **exact finite-sample randomization inference**, **nonparametric partial identification bounds**, **structural treatment-clock duration deconvolution**, and **Bayesian panel forest smoothing**.
+
+```{r setup}
+#| message: false
+#| warning: false
+library(longbet)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+library(knitr)
+
+# Set seed for reproducible textbook figures
+set.seed(2026)
+```
+
+---
+
+## The Identification Landscape in Longitudinal Panels
+
+Let $i = 1, \dots, N$ index units (e.g., enterprise accounts) observed over discrete calendar periods $t = 1, \dots, T$.
+
+### Potential Outcomes Over Time
+
+For each unit $i$ and calendar period $t$:
+
+- $Z_i \in \{0, 1\}$ is the randomized encouragement assignment (e.g., concierge onboarding prompt received at $t_{\text{enc}}$).
+- $D_{it}(z) \in \{0, 1\}$ is the potential adoption status at period $t$ under assignment $z$. In most software settings, adoption is absorbing: once a team adopts, $D_{i, t+1} \ge D_{it}$.
+- $Y_{it}(z, \mathbf{d})$ is the potential outcome (e.g., weekly active user hours or gross merchandise value) at period $t$ under assignment $z$ and adoption history $\mathbf{d} = (d_1, \dots, d_t)$.
+
+Under the **Exclusion Restriction**, the encouragement instrument $Z_i$ affects the outcome only through its effect on actual adoption:
+
+$$
+Y_{it}(z, \mathbf{d}) = Y_{it}(\mathbf{d}) \quad \forall z \in \{0, 1\}
+$$
+
+Under **Monotonicity** (no defiers), encouragement never discourages adoption:
+
+$$
+D_{it}(1) \ge D_{it}(0) \quad \forall i, t
+$$
+
+### The Two Clocks: Calendar Time vs. Exposure Duration
+
+In longitudinal settings, we must distinguish between two separate time axes:
+
+1. **Calendar Clock ($t$)**: Shared across all units, capturing seasonality, macro trends, and platform-wide product updates.
+2. **Exposure Duration Clock ($S_{it}$)**: The cumulative number of periods unit $i$ has actively utilized the feature up to calendar time $t$:
+   $$
+   S_{it} = \sum_{s=1}^t D_{is}
+   $$
+
+If team $A$ adopts at week 2 and team $B$ adopts at week 4, then at calendar week 5, both teams are actively using the feature ($D_{A5} = D_{B5} = 1$). However, team $A$ has accumulated $S_{A5} = 4$ weeks of exposure, whereas team $B$ has accumulated only $S_{B5} = 2$ weeks. 
+
+If value compounds with user tenure, team $A$'s outcome will be substantially higher than team $B$'s—not because of current adoption status, but because of **cumulative duration**.
+
+---
+
+## Simulating an Enterprise SaaS Encouragement Experiment
+
+To demonstrate the full toolkit, we simulate a realistic enterprise SaaS experiment: $N = 300$ business accounts observed over $T = 6$ weekly billing periods. At week 2, half the accounts are randomly assigned to receive an intensive onboarding concierge nudging them to activate an advanced workflow automation tool ($Z_i = 1$).
+
+We incorporate realistic compliance heterogeneity:
+- **Always-Takers (15%)**: Sophisticated power users who enable the workflow in week 1 before encouragement even starts.
+- **Never-Takers (30%)**: Accounts with legacy infrastructure who never adopt the feature during the study.
+- **Compliers / Accelerated Adopters (55%)**: Accounts swayed by the nudge. If encouraged ($Z=1$), they adopt immediately at week 2. If placed in control ($Z=0$), they eventually adopt at week 4 after hearing about the feature from peers.
+
+```{r simulate-data}
+N <- 300
+T_len <- 6
+t_grid <- 1:T_len
+t_enc <- 2
+
+# Complete randomization: 150 encouraged, 150 control
+z_unit <- rep(c(1, 0), each = N / 2)
+z <- matrix(0, N, T_len)
+z[z_unit == 1, t_enc:T_len] <- 1
+
+# Assign compliance types
+types <- sample(
+  c("always", "never", "complier"),
+  size = N,
+  replace = TRUE,
+  prob = c(0.15, 0.30, 0.55)
+)
+
+# Generate absorbing adoption panel D
+d <- matrix(0, N, T_len)
+for (i in 1:N) {
+  if (types[i] == "always") {
+    d[i, 1:T_len] <- 1
+  } else if (types[i] == "never") {
+    d[i, 1:T_len] <- 0
+  } else {
+    # Compliers adopt at t=2 under encouragement, or t=4 under control
+    if (z_unit[i] == 1) {
+      d[i, 2:T_len] <- 1
+    } else {
+      d[i, 4:T_len] <- 1
+    }
+  }
+}
+
+# Cumulative exposure duration: S_{it} = sum_{s <= t} D_{is}
+duration <- t(apply(d, 1, cumsum))
+
+# Baseline covariates: team size and historical baseline activity
+x <- cbind(
+  team_size = round(rnorm(N, mean = 20, sd = 5)),
+  baseline_activity = round(rnorm(N, mean = 45, sd = 10), 1)
+)
+
+# Unit fixed effects and calendar time trend
+unit_fe <- rnorm(N, mean = 25, sd = 8)
+calendar_trend <- c(0, 3, 6, 9, 12, 15)
+
+# True structural parameters:
+# True causal effect is +10.0 active user hours per week of exposure
+true_beta_duration <- 10.0
+
+# Generate outcome panel Y with unobserved endogeneity (rho = 0.35)
+unobserved_ability <- rnorm(N, mean = 0, sd = 4)
+y <- matrix(0, N, T_len)
+for (t in 1:T_len) {
+  y[, t] <- unit_fe +
+    calendar_trend[t] +
+    0.8 * x[, "team_size"] +
+    0.5 * x[, "baseline_activity"] +
+    true_beta_duration * duration[, t] +
+    0.35 * unobserved_ability * d[, t] + # Endogeneity: adopters have higher engagement
+    rnorm(N, mean = 0, sd = 3)
+}
+```
+
+---
+
+## Data Validation and Descriptive Uptake Dynamics
+
+Before fitting complex models, the first rule of longitudinal causal inference is **panel validation**:
+- Are $Z$ and $D$ absorbing (never switching back from $1 \to 0$)?
+- Is there pre-encouragement adoption?
+- How does the empirical uptake gap evolve over calendar time?
+
+`validate_encouragement()` verifies these structural properties against LongBet's contract:
+
+```{r validate-panel}
+validation <- validate_encouragement(z, d, t = t_grid)
+as.data.frame(validation)
+```
+
+Next, `encouragement_summary()` computes assigned-arm take-up rates, empirical first-stage differences, and observed adoption lags:
+
+```{r adoption-summary}
+uptake_summary <- encouragement_summary(z, d, t = t_grid)
+
+uptake_summary %>%
+  select(period, takeup_control, takeup_encouraged, first_stage, first_stage_se) %>%
+  kable(
+    digits = 3,
+    caption = "Assigned-arm adoption rates and empirical first-stage across calendar periods."
+  )
+```
+
+Notice the crucial pattern in Table 1:
+- In **Period 1** (pre-encouragement), take-up is identical (~15%), reflecting always-takers.
+- In **Periods 2 and 3**, encouragement produces a massive first-stage lift: take-up jumps to ~70% in the encouraged arm vs. 15% in control ($\text{ITT}_d \approx +0.55$).
+- In **Periods 4, 5, and 6**, the control compliers adopt! Control take-up catches up to ~70%. **The static adoption difference $\text{ITT}_d$ collapses to zero.**
+
+We can visualize this dynamic using `plot_encouragement()`:
+
+```{r plot-adoption}
+#| fig.width: 8
+#| fig.height: 4.5
+plot_encouragement(z, d, t = t_grid) +
+  labs(
+    title = "Workflow Automation Adoption Curves by Assigned Encouragement Arm",
+    subtitle = "Shaded area illustrates the temporary acceleration window before control catches up.",
+    x = "Calendar Week",
+    y = "Cumulative Adoption Rate"
+  )
+```
+
+---
+
+## Design-Based Reference Analysis and The Acceleration Trap
+
+`encouragement_effects()` computes the assigned-arm Intent-to-Treat differences for both outcomes and adoption, along with the studentized Wald ratio confidence set:
+
+```{r reference-effects}
+ref_effects <- encouragement_effects(y, d, z, t = t_grid)
+
+ref_effects %>%
+  select(period, horizon, itt_y, itt_y_se, itt_d, itt_d_se, wald, wald_set_type, wald_lower_1, wald_upper_1) %>%
+  kable(
+    digits = 2,
+    caption = "Assigned-arm ITTs and reference Wald confidence sets across post-encouragement horizons."
+  )
+```
+
+### Unpacking the Failure of the Static Wald Ratio
+
+Look carefully at Horizons 3, 4, and 5 in Table 2:
+- At **Horizon 1** (Week 2): $\text{ITT}_y = 5.72$, $\text{ITT}_d = 0.55$. The Wald ratio is $\text{Wald} = 5.72 / 0.55 \approx 10.4$, cleanly capturing the effect of adoption.
+- At **Horizon 2** (Week 3): $\text{ITT}_y = 11.20$, $\text{ITT}_d = 0.55$. The Wald ratio is $\text{Wald} = 11.20 / 0.55 \approx 20.3$, reflecting two weeks of accumulated exposure.
+- At **Horizon 3** (Week 4): Control compliers adopt! The denominator $\text{ITT}_d$ drops to $0.00$. The outcome difference $\text{ITT}_y$, however, remains positive ($\approx 11.5$) because treated accounts have been using the feature two weeks longer!
+- As a result, the static Wald ratio divides by zero: `wald = Inf`, and the confidence set becomes `all_real` ($[-\infty, +\infty]$).
+
+This is **The Acceleration Trap**. In any setting where an intervention accelerates adoption rather than permanently altering the terminal steady state, static 2SLS is structurally incapable of estimating treatment effects at later horizons.
+
+---
+
+## Exact Randomization-Based Anderson-Rubin Inference
+
+When the first stage may be weak, asymptotic normal approximations fail. Standard ratio Wald intervals undercover severely because the ratio of two normally distributed estimators follows a Cauchy-like distribution with undefined moments.
+
+`randomization_ar()` solves this by **inverting an exact finite-sample permutation test**. Under the sharp null hypothesis $H_0: \beta = \beta_0$, we can construct the adjusted residual:
+
+$$
+R_i(\beta_0) = Y_{it} - \beta_0 D_{it}
+$$
+
+Under $H_0$, $R_i(\beta_0)$ is invariant to assignment $Z_i$. We can compute the studentized test statistic $T(\beta_0)$ across permutations of $Z$. Candidate values $\beta_0$ where the permutation $p$-value exceeds $\alpha = 0.05$ form the **exact 95% confidence set**.
+
+```{r randomization-ar}
+# Test candidate effect values on a grid from -5 to 25
+beta_test_grid <- seq(-5, 25, by = 0.5)
+
+ar_result <- randomization_ar(
+  y = y,
+  d = d,
+  z = z,
+  beta = beta_test_grid,
+  alpha = 0.05,
+  method = "monte_carlo",
+  permutations = 1000L,
+  seed = 42L
+)
+
+# Extract accepted values at Horizon 1 (Week 2)
+h1_ar <- ar_result$table %>% filter(horizon == 1)
+accepted_betas <- h1_ar %>% filter(accepted) %>% pull(beta)
+
+cat(sprintf(
+  "Randomization AR 95%% Confidence Set at Horizon 1: [%.1f, %.1f]\n",
+  min(accepted_betas), max(accepted_betas)
+))
+```
+
+We can plot the exact permutation $p$-value curve:
+
+```{r plot-ar-curve}
+#| fig.width: 8
+#| fig.height: 4.5
+ggplot(h1_ar, aes(x = beta, y = p_value)) +
+  geom_line(color = "#1f77b4", linewidth = 1) +
+  geom_point(aes(color = accepted), size = 1.5) +
+  geom_hline(yintercept = 0.05, linetype = "dashed", color = "firebrick") +
+  geom_vline(xintercept = 10.0, linetype = "dotted", color = "darkgreen", linewidth = 1) +
+  scale_color_manual(values = c("TRUE" = "#2ca02c", "FALSE" = "#d62728")) +
+  annotate("text", x = 10.2, y = 0.8, label = "True Beta (10.0)", color = "darkgreen", hjust = 0) +
+  annotate("text", x = -2, y = 0.08, label = "alpha = 0.05 threshold", color = "firebrick") +
+  labs(
+    title = "Exact Randomization-Based Anderson-Rubin Test Inversion",
+    subtitle = "Points above the dashed alpha=0.05 line constitute the exact finite-sample confidence set.",
+    x = "Candidate Treatment Effect (beta_0)",
+    y = "Permutation p-value",
+    color = "Accepted"
+  ) +
+  theme_minimal()
+```
+
+Notice the key properties:
+- Unlike 2SLS, the Randomization AR interval is **exact in finite samples** and requires no large-sample asymptotic justification.
+- The confidence set correctly covers the true parameter value ($\beta = 10.0$).
+- If the first stage is weak or nonexistent, the $p$-value curve never drops below $\alpha$, and the function returns an unbounded set ($[-\infty, +\infty]$), honestly signaling that the data cannot rule out large effects.
+
+---
+
+## Nonparametric Identification Bounds
+
+What if we are unwilling to assume that the Exclusion Restriction holds perfectly? Suppose receiving the onboarding concierge prompt directly inspired teams to work harder, violating exclusion by some direct effect $\delta$.
+
+`encouragement_bounds()` computes **sharp Manski and Balke-Pearl bounds** on principal-stratum treatment effects with sensitivity limits:
+
+```{r identification-bounds}
+# Binarize outcome at median for sharp natural bounds
+y_binary_h1 <- (y[, t_enc] > median(y[, t_enc])) * 1.0
+
+# 1. Natural bounds under strict exclusion (delta = 0) at Horizon 1 (t = 2)
+bounds_strict <- encouragement_bounds(
+  y = y_binary_h1,
+  d = d[, t_enc],
+  z = z[, t_enc],
+  delta = 0.0,
+  draws = 500L,
+  chains = 2L,
+  seed = 42L
+)
+
+# 2. Sensitivity bounds allowing up to 10% direct instrument violation (delta = 0.10)
+bounds_sens <- encouragement_bounds(
+  y = y_binary_h1,
+  d = d[, t_enc],
+  z = z[, t_enc],
+  delta = 0.10,
+  draws = 500L,
+  chains = 2L,
+  seed = 42L
+)
+
+bounds_strict$table %>%
+  select(estimand, lower_median, upper_median, lower_ci_lower, upper_ci_upper) %>%
+  kable(digits = 3, caption = "Balke-Pearl sharp bounds under strict exclusion restriction (delta = 0) at Horizon 1.")
+```
+
+When exclusion holds at Horizon 1 ($\delta = 0$), the Balke-Pearl bounds on complier encouragement provide a tight interval. As $\delta$ increases, the bounds expand, providing a mathematically rigorous boundary for sensitivity analysis.
+
+Importantly, `encouragement_bounds()` also performs an automatic **Balke-Pearl empirical compatibility test**. If an analyst attempts to fit static cross-sectional bounds at $t = 6$ where adoption acceleration has created differential duration exposure, the function reports `compatible_fraction = 0`. The data mathematically rejects the joint hypothesis of monotonicity and static exclusion restriction, alerting the practitioner to duration confounding before faulty conclusions are drawn.
+
+---
+
+## Solving Adoption Acceleration with Duration Deconvolution
+
+To resolve the Acceleration Trap where static 2SLS breaks down, LongBet introduces **Structural Treatment-Clock Duration Deconvolution**.
+
+Instead of modeling $Y_{it}$ as a function of static stock adoption $D_{it}$, we model the outcome as an additive function of **cumulative exposure duration**:
+
+$$
+Y_{it} = \alpha_i + \lambda_t + g(\text{duration}_{it}) + \varepsilon_{it}
+$$
+
+where $\text{duration}_{it} = \sum_{s \le t} D_{is}$. 
+
+The endogenous duration trajectory is instrumented using the history and interaction of assigned encouragement $Z_i$ with post-encouragement time $(t - t_{\text{enc}})_+$. Even when adoption stocks converge ($D_1 = D_0 = 1$), the accumulated exposure duration difference persists across all subsequent horizons!
+
+```{r duration-deconvolution}
+deconv_fit <- duration_deconvolution_effects(
+  y = y,
+  d = d,
+  z = z,
+  t = t_grid,
+  model_type = "linear",
+  alpha = 0.05
+)
+
+deconv_fit$summary_table %>%
+  kable(
+    digits = 2,
+    caption = "Estimated cumulative causal effect by exposure duration via structural deconvolution."
+  )
+```
+
+Look at the results in Table 4:
+- **First-stage $F$-statistic**: `r round(deconv_fit$first_stage_f, 1)` (massively exceeding the Stock-Yogo weak instrument threshold of 10).
+- **Estimated marginal effect per period of exposure**: `r round(deconv_fit$effects[1], 2)` user hours (true value: `r true_beta_duration`).
+- **95% Confidence Interval**: [`r round(deconv_fit$ci_lower[1], 2)`, `r round(deconv_fit$ci_upper[1], 2)`].
+
+We can plot the recovered duration-response curve:
+
+```{r plot-deconvolution}
+#| fig.width: 8
+#| fig.height: 4.5
+ggplot(deconv_fit$summary_table, aes(x = duration, y = cumulative_effect)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), fill = "#1f77b4", alpha = 0.2) +
+  geom_line(color = "#1f77b4", linewidth = 1.2) +
+  geom_point(color = "#1f77b4", size = 2.5) +
+  geom_line(
+    aes(y = duration * true_beta_duration),
+    color = "darkgreen",
+    linetype = "dashed",
+    linewidth = 1
+  ) +
+  annotate(
+    "text",
+    x = 4.2,
+    y = 4.2 * true_beta_duration - 4,
+    label = "True Linear Response",
+    color = "darkgreen"
+  ) +
+  scale_x_continuous(breaks = 1:5) +
+  labs(
+    title = "Structural Treatment-Clock Duration Response Curve",
+    subtitle = "Recovered marginal lift per week of feature exposure under adoption acceleration.",
+    x = "Cumulative Weeks of Active Tool Exposure",
+    y = "Cumulative Treatment Effect (User Hours)"
+  ) +
+  theme_minimal()
+```
+
+---
+
+## Bayesian Panel Modeling with LongBet
+
+For settings with high-dimensional baseline covariates $X$ and complex non-linear prognostic trajectories, we turn to LongBet's Bayesian forest engine.
+
+`longbet_encourage()` fits joint Bayesian reduced forms for both the outcome equation and the adoption equation:
+
+$$
+\begin{aligned}
+Y_{it} &= \mu_y(X_i, t) + \tau_y(X_i, t) Z_i + \gamma_{y, i} + \varepsilon_{y, it} \\
+D_{it} &= \mu_d(X_i, t) + \tau_d(X_i, t) Z_i + \gamma_{d, i} + \varepsilon_{d, it}
+\end{aligned}
+$$
+
+The model smooths trajectories across calendar time using Gaussian processes, incorporates unit-level random intercepts ($\gamma_i$), and couples forest uncertainty across equations:
+
+```{r longbet-encourage-fit}
+#| cache: true
+# Fit joint Bayesian encouragement model with LPM first stage
+fit_bayes <- longbet_encourage(
+  y = y,
+  d = d,
+  z = z,
+  x = x,
+  t = t_grid,
+  first_stage = "lpm",
+  config = list(
+    num_trees_pr = 20L,
+    num_trees_trt = 20L,
+    num_sweeps = 60L,
+    num_burnin = 20L
+  )
+)
+
+# Predict common-population ITT trajectories and diagnostics
+pred_bayes <- predict(fit_bayes, summary_only = TRUE)
+
+pred_bayes$effects %>%
+  filter(group == "all") %>%
+  select(horizon, quantity, posterior_median, posterior_lower, posterior_upper, ess_bulk, rhat) %>%
+  kable(
+    digits = 2,
+    caption = "LongBet posterior ITT and Wald median estimates with MCMC convergence diagnostics."
+  )
+```
+
+### Methodological Guardrail: Why Bayesian Wald Ratios Require Caution
+
+Notice the diagnostic metadata in `pred_bayes$effects`:
+- For $\text{ITT}_y$ and $\text{ITT}_d$, MCMC diagnostics pass with flying colors: $\hat{R} \le 1.01$ and $\text{ESS} > 400$.
+- However, for the **Wald ratio** ($\text{ITT}_y / \text{ITT}_d$), the posterior distribution can be extremely fragile whenever draws of $\text{ITT}_d$ cross zero.
+- LongBet explicitly marks `calibration_status = not_established` for posterior ratios. It does **not** clip draws or hide near-zero denominators behind diffuse priors.
+
+::: {.callout-warning title="Golden Rule of Longitudinal IV Inference"}
+Never rely solely on a naive posterior ratio interval when the first stage is moderate or weak. Always **triangulate** your findings:
+1. Use **`randomization_ar()`** for unshakeable, exact confidence sets on the causal ratio.
+2. Use **`duration_deconvolution_effects()`** whenever adoption timing is accelerated.
+3. Use **`LongBetEncourage`** for covariate adjustment and temporal smoothing of the reduced-form ITTs.
+:::
+
+---
+
+## Dynamic Hazard Adoption Modeling
+
+In longitudinal studies, modeling binary adoption as an static panel ignores the fact that users are only at risk of adopting **until they adopt**. Once adopted, an absorbing user cannot adopt again.
+
+`hazard_adoption_effects()` models adoption on the **active dynamic risk set**:
+
+$$
+\mathcal{R}_t = \{i : D_{i, t-1} = 0\}
+$$
+
+It estimates conditional adoption hazard $\lambda_{it} = \Pr(D_{it} = 1 \mid D_{i, t-1} = 0, Z_i, X_i)$ using probit regression with an exact **spike-and-slab** relevance indicator:
+
+$$
+\xi \sim \text{Bernoulli}(\pi_0)
+$$
+
+The spike-and-slab indicator places non-zero prior mass directly on the exact null hypothesis ($\tau_d = 0$). When an instrument lacks relevance, $\xi$ drops to zero, completely eliminating weak-instrument parameter drift:
+
+```{r hazard-adoption}
+hazard_res <- hazard_adoption_effects(
+  d = d,
+  z = z,
+  x = x,
+  t = t_grid,
+  trees = 4L,
+  chains = 2L,
+  burnin = 100L,
+  draws = 200L,
+  seed = 42L
+)
+
+hazard_res$table %>%
+  select(horizon, relevance_prob, hazard_itt_median, stock_itt_median, exposure_itt_median) %>%
+  kable(
+    digits = 3,
+    caption = "Discrete-time hazard adoption effects and spike-and-slab instrument relevance."
+  )
+```
+
+Because our nudge had a strong real effect in weeks 2-3, the posterior inclusion probability $P(\xi = 1 \mid \text{data})$ converges to $1.00$, confirming strong instrument relevance while conditioning strictly on active non-adopters.
+
+---
+
+## Practical Business Decision Playbook
+
+When presenting results from a randomized encouragement design to business stakeholders and executive leadership, follow this decision tree:
+
+```
+                            Randomized Encouragement Experiment
+                                             │
+                        ┌────────────────────┴────────────────────┐
+                        ▼                                         ▼
+            Evaluating Program ROI?                    Evaluating Product Value?
+            (Cost of Concierge / Nudge)               (Marginal Value of Adoption)
+                        │                                         │
+                        ▼                                         ▼
+                  Report ITT_y                               Do Adoption Curves
+             (Outcome lift per nudge)                            Accelerate?
+                        │                                         │
+                        │                        ┌────────────────┴────────────────┐
+                        │                        ▼                                 ▼
+                        │                      YES                                NO
+                        │                       │                                 │
+                        │                       ▼                                 ▼
+                        │            Run Duration Deconvolution          Run Randomization AR
+                        │           (Marginal lift per week of         (Exact finite-sample CACE
+                        │               feature exposure)                 confidence interval)
+                        │                       │                                 │
+                        └───────────────────────┼─────────────────────────────────┘
+                                                ▼
+                                   Triangulate with LongBet
+                               (Covariate adjustment & GP smoothing)
+```
+
+### Summary Checklist for Applied Practitioners
+
+1. **Verify absorbing states**: Ensure $Z$ and $D$ never reverse using `validate_encouragement()`.
+2. **Check for adoption acceleration**: Compare adoption curves between arms. If control catches up to treated uptake, static 2SLS will divide by zero; switch to `duration_deconvolution_effects()`.
+3. **Guard against weak-instrument distortion**: Never trust asymptotic normal ratios if first-stage $F < 10$. Invert the exact permutation test using `randomization_ar()`.
+4. **Inspect partial identification bounds**: Use `encouragement_bounds()` to evaluate sensitivity to potential direct effects ($\delta$).
+5. **Smooth with Bayesian panel trees**: Use `longbet_encourage()` or `longbet_direct_smooth()` to isolate heterogeneous treatment effects across customer segments.
+
+---
+
+## References {.unnumbered}
+
+- Angrist, J. D., Imbens, G. W., & Rubin, D. B. (1996). Identification of causal effects using instrumental variables. *Journal of the American Statistical Association*, 91(434), 444–455.
+- Balke, A., & Pearl, J. (1997). Bounds on treatment effects from studies with imperfect compliance. *Journal of the American Statistical Association*, 92(439), 1171–1176.
+- Chernozhukov, V., & Hansen, C. (2008). The reduced form: A simple approach to inference with weak instruments. *Economics Letters*, 100(1), 68–71.
+- Imbens, G. W., & Rosenbaum, P. R. (2005). Robust, accurate confidence intervals with a weak instrument: quarter of birth and education. *Journal of the Royal Statistical Society: Series A*, 168(1), 109–126.
+- Martinez, I. (2024). *Business Data Science: A guide for data-driven decisions*. [book.martinez.fyi](https://book.martinez.fyi).
+- Wang, Y., Hahn, P. R., & Martinez, I. (2024). LongBet: Heterogeneous treatment effects in panel data. *arXiv preprint*.

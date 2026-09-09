@@ -91,6 +91,33 @@ def test_python_multi_exports():
         assert symbol in longbet.__all__, f"{symbol} missing from longbet.__all__"
 
 
+def test_encouragement_contract_signatures_exports_and_columns(contract):
+    import inspect
+    import numpy as np
+    import longbet
+
+    api = contract["encouragement_api"]
+    namespace = (CONTRACT_PATH.parents[1] / "NAMESPACE").read_text()
+    for name, spec in api["functions"].items():
+        assert name in longbet.__all__
+        assert f"export({name})" in namespace
+        signature = inspect.signature(getattr(longbet, name))
+        expected = set(spec["required"]) | set(spec["defaults"]) | set(spec.get("python_only_defaults", {}))
+        assert set(signature.parameters) == expected
+        for key in spec["required"]:
+            assert signature.parameters[key].default is inspect.Parameter.empty
+        for key, value in {**spec["defaults"], **spec.get("python_only_defaults", {})}.items():
+            assert signature.parameters[key].default == value
+
+    z = np.array([[0, 1], [0, 1], [0, 0], [0, 0]])
+    assert list(longbet.validate_encouragement(z, z)) == api["metadata_fields"]
+    assert list(longbet.encouragement_summary(z, z)) == api["summary_columns"]
+    result = longbet.encouragement_effects(z, z, z)
+    assert list(result) == api["effects_columns"]
+    assert result.inference.iloc[0] == api["inference"]["method"]
+    assert result.wald_set_type.iloc[0] in api["inference"]["set_types"]
+
+
 def test_r_frontdoor_signatures_and_defaults(contract):
     """Ensure R functions longbet and longbet_multi have formals matching the contract."""
     import re
@@ -131,3 +158,55 @@ def test_r_frontdoor_signatures_and_defaults(contract):
         'S3method("[", longbet_multi.pred)',
     ):
         assert exp in ns, f"NAMESPACE missing {exp}"
+
+
+def test_encouragement_model_contract(contract):
+    import inspect
+    import longbet
+    from longbet._encourage_model import ARCHIVE_VERSION, INFERENCE_VERSION
+
+    api = contract["encouragement_model_api"]
+    assert api["archive_version"] == ARCHIVE_VERSION
+    assert api["inference_version"] == INFERENCE_VERSION
+    assert api["calibration_status"] == "not_established"
+    cls = longbet.LongBetEncourage
+    for name in ("LongBetEncourage", "EncouragementPrediction", "EncouragementComparison"):
+        assert name in longbet.__all__
+    init = inspect.signature(cls)
+    for key in api["constructor"]["required"]:
+        assert init.parameters[key].default is inspect.Parameter.empty
+    for key, value in api["constructor"]["defaults"].items():
+        assert init.parameters[key].default == value
+    model = cls(first_stage="lpm")
+    for key, value in api["constructor"]["wrapper_default_priors"].items():
+        assert getattr(model.config, key) == value
+    for method in ("fit", "predict", "bootstrap_comparison"):
+        sig = inspect.signature(getattr(cls, method))
+        spec = api[method]
+        expected = {"self"} | set(spec.get("required", [])) | set(spec["defaults"])
+        assert set(sig.parameters) == expected
+        for key in spec.get("required", []):
+            assert sig.parameters[key].default is inspect.Parameter.empty
+        for key, value in spec["defaults"].items():
+            assert sig.parameters[key].default == value
+    for method, defaults in api["posterior_methods"].items():
+        sig = inspect.signature(getattr(longbet.EncouragementPrediction, method))
+        assert set(sig.parameters) == {"self"} | set(defaults)
+        for key, value in defaults.items():
+            assert sig.parameters[key].default == value
+
+
+def test_encouragement_design_contract(contract):
+    import inspect
+    import longbet
+    api = contract["encouragement_design_api"]
+    fields = {f.name: f.default for f in dataclasses.fields(longbet.EncouragementDesign)}
+    assert fields == api["defaults"]
+    sig = inspect.signature(longbet.design_encouragement_effects)
+    assert set(sig.parameters) == set(api["required"]) | set(api["effects_defaults"])
+    for key, value in api["effects_defaults"].items():
+        assert sig.parameters[key].default == value
+    for key in api["required"]:
+        assert sig.parameters[key].default is inspect.Parameter.empty
+    for name in ("EncouragementDesign", "EncouragementDesignResult", "design_encouragement_effects"):
+        assert name in longbet.__all__
