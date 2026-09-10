@@ -80,7 +80,7 @@ Outcomes in these experiments depend on current adoption, so horizon-specific
 exclusion and monotonicity give a valid current-adoption CACE target. This does
 not impose current-adoption exclusion on the vignette's duration example.
 At zero relevance, the CACE target is undefined, not zero. Report reduced-form
-coverage and null-moment rejection rates there. Weak-stage ratio RMSE is
+coverage and null-moment rejection rates there for fixed beta values -2, 0, 2 and 10. Weak-stage ratio RMSE is
 descriptive only and cannot justify continuation.
 
 ## Continuation rule

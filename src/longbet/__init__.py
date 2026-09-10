@@ -26,6 +26,9 @@ from longbet._direct_smooth import (
     DirectSmoothConfig,
     LongBetDirectSmooth,
 )
+from longbet._iv import longbet_iv
+from longbet._iv_nuisance import LongBetIVNuisance, LongBetIVNuisanceConfig
+from longbet._orthogonal_iv import CrossfitEncouragementResult, crossfit_encouragement
 from longbet._randomization_ar import (
     RandomizationARResult,
     randomization_ar,
@@ -91,6 +94,7 @@ __all__ = [
     "CoupledHazardConfig",
     "CoupledHazardIV",
     "CoupledHazardResult",
+    "CrossfitEncouragementResult",
     "Design",
     "DirectSmoothConfig",
     "DurationDeconvolutionResult",
@@ -106,6 +110,8 @@ __all__ = [
     "LongBetConfig",
     "LongBetDirectSmooth",
     "LongBetEncourage",
+    "LongBetIVNuisance",
+    "LongBetIVNuisanceConfig",
     "LongBetMulti",
     "LongBetMultiPrediction",
     "LongBetPrediction",
@@ -117,6 +123,7 @@ __all__ = [
     "available_devices",
     "compute_ess",
     "compute_rhat",
+    "crossfit_encouragement",
     "derive_exposure",
     "design_encouragement_effects",
     "duration_deconvolution_effects",
@@ -132,6 +139,7 @@ __all__ = [
     "joint_prob",
     "load_multi_npz",
     "load_npz",
+    "longbet_iv",
     "outcome_correlation",
     "plot_rollout",
     "plot_encouragement",
