@@ -168,8 +168,11 @@ With binary Y and probit adoption, innovation loadings are fixed to zero in both
 equations; the default separate-forest posteriors are independent even when
 `sur=True`. This limitation is recorded in model metadata and calibration results.
 
-**IV implementation review, 2026-09-10:** the repaired direct-smoothing model is
-being assessed under a [matched IV comparison protocol](benchmarks/encouragement/comparison-protocol.md).
+**IV implementation review, 2026-09-10:** the [completed matched comparison](benchmarks/encouragement/comparison-report.md)
+uses 600 independent experiments plus 300 matched correlated-intercept fits.
+Neither configuration establishes an advantage over both adjusted IV baselines;
+reduced-form coverage also fails in the tested settings. The report recommends
+stopping the effort to promote this as a superior IV method.
 The [benchmark correction record](benchmarks/encouragement/README.md#implementation-and-metric-correction-2026-09-10)
 documents invalid metrics in the old `sbc_calibration.py`: binary-set nonemptiness
 and padded hazard intervals were incorrectly reported as coverage. The corrected

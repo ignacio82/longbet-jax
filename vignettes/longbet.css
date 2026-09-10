@@ -1,5 +1,6 @@
 /* Keep long equations and inline code within the chapter's reading column. */
-main .math.display {
+main .math.display,
+main mjx-container[display="true"] {
   display: block;
   max-width: 100%;
   overflow-x: auto;

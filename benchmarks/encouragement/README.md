@@ -2,6 +2,12 @@
 
 ## Implementation and metric correction, 2026-09-10
 
+The [completed comparison report](comparison-report.md) recommends stopping the
+IV-method superiority effort. Across 600 independent experiments and 300 matched
+correlated-intercept fits, neither tested configuration improves on both adjusted
+baselines while meeting the accuracy, coverage and diagnostic criteria. Complete
+records and checksums are in [comparison-results](comparison-results/).
+
 The [current comparison protocol](comparison-protocol.md) evaluates the repaired
 direct-smoothing estimator against both linear and spline ANCOVA/Fieller
 comparators on identical potential-outcome targets. It prespecifies strong,

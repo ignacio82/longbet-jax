@@ -6,7 +6,8 @@ Parameterizes the panel reduced forms directly as:
 Leaves contain smooth Gaussian Process time vectors with fixed RBF covariance.
 Tree topologies are sampled using exact finite-stump collapsed Gibbs steps.
 Baseline and effect leaves and unit intercepts can be drawn jointly conditional on
-topologies (direct_joint), eliminating the MCMC mixing failure of multiplicative GP models.
+topologies (direct_joint), removing the multiplicative parameterization.
+Convergence still requires checking for the reported quantities.
 Supports optional full Inverse-Wishart random intercept covariance across equations.
 """
 from __future__ import annotations

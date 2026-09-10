@@ -13,8 +13,10 @@ posterior ratios. Passing an ESS or R-hat threshold does not establish coverage.
 The follow-up [sampler repair study](../benchmarks/encouragement/repair-report.md)
 contains earlier research candidates. The repaired direct-smoothing model is now
 available as `engine="direct_smooth"`, with explicit `direct_config` controls.
-Its sampling tests and the [matched comparison protocol](../benchmarks/encouragement/comparison-protocol.md)
-separate computational correctness from empirical accuracy and coverage.
+Its sampling tests and the [completed matched comparison](../benchmarks/encouragement/comparison-report.md)
+separate computational correctness from empirical accuracy and coverage. Neither
+evaluated covariance configuration establishes an advantage over both adjusted
+IV baselines, and reduced-form coverage remains inadequate in tested settings.
 
 ## Data and interpretation
 
@@ -369,6 +371,8 @@ This backend supports continuous outcomes, an LPM first stage, and summaries for
 the fitted population. It rejects binary/probit, subgroup and new-covariate
 prediction requests. Forest and prior options belong in `direct_config`;
 `config` supplies sampling controls. Serialized fits preserve covariance traces.
+Legacy direct-backend archives must be refit: their saved contrasts and sampler
+semantics precede these repairs, and the new loader rejects them explicitly.
 
 The working Gaussian adoption likelihood does not represent all dependence
 created by absorbing binary adoption. Correlated intercepts model a shared unit
@@ -393,6 +397,11 @@ hazard <- hazard_adoption_effects(d, z, x, t = t,
   trees = 4L, chains = 4L, burnin = 500L, draws = 1000L, seed = 42L)
 hazard$table
 ```
+
+This extension requires equally spaced observations, even though the general
+reference API permits unequal whole-unit gaps. Adoption already present in the
+first column is treated as a first-observation event; the model does not recover
+earlier adoption histories or implement left truncation.
 
 The hazard likelihood respects absorbing adoption. Its risk set contains units
 not yet adopted, a group whose composition can depend on assignment. A hazard
