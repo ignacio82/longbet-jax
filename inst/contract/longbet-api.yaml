@@ -603,7 +603,7 @@ encouragement_model_api:
     wrapper_default_priors: {sigma_prior_a: 2.0, sigma_prior_b: 1.0}
   r_fit:
     required: ["y", d, z, x, first_stage]
-    defaults: {t: null, x_trt: null, outcome: continuous, config: {}, verbose: false}
+    defaults: {t: null, x_trt: null, outcome: continuous, config: {}, verbose: false, engine: longbet, direct_config: {}}
   r_predict:
     required: [object]
     defaults: {summary_only: true, groups: null, block_size: null, standardization: conditional, alpha: 0.05, min_ess: 400, max_rhat: 1.01, practical_threshold: null}

@@ -119,4 +119,62 @@ test_that("duration_deconvolution_effects runs and returns estimates in R", {
   expect_true(length(res$durations) > 0)
   expect_true(length(res$effects) == length(res$durations))
   expect_true(res$first_stage_f >= 0)
+  expect_identical(res$first_stage_status, "available")
+  expect_identical(res$instrument_rank, 3L)
+  expect_identical(res$regressor_rank, 1L)
+  expect_identical(res$residual_df, 14L)
+  expect_identical(res$n_clusters, 6L)
+  expect_identical(res$inference_method, "unit_cluster_CR1_t")
+  expect_s3_class(res$first_stage_diagnostics, "data.frame")
+  expect_named(res$first_stage_diagnostics, c("regressor", "cluster_wald_f",
+    "status", "instrument_rank", "cluster_df", "residual_df", "partial_r_squared"))
+  expect_equal(res$first_stage_diagnostics$cluster_wald_f, res$first_stage_f)
+  expect_equal(res$first_stage_diagnostics$residual_df, 12)
+  expect_equal(res$first_stage_diagnostics$cluster_df, 5)
+  expect_identical(dim(res$coefficient_covariance), c(1L, 1L))
+  expect_equal(sqrt(res$coefficient_covariance[1, 1]), res$se[1])
+  expect_equal(res$coefficients, res$effects[1])
+  expect_null(attr(res$first_stage_diagnostics, "pandas.index"))
+  expect_identical(unserialize(serialize(res, NULL)), res)
+})
+
+test_that("duration_deconvolution_effects preserves unavailable first-stage diagnostics", {
+  skip_without_engine()
+  p <- encourage_panel()
+  multiple <- duration_deconvolution_effects(p$y, p$d, p$z, model_type = "quadratic")
+  expect_true(is.nan(multiple$first_stage_f))
+  expect_identical(multiple$first_stage_status,
+    "unavailable_for_multiple_endogenous_regressors")
+  expect_identical(multiple$regressor_rank, 2L)
+  expect_identical(dim(multiple$coefficient_covariance), c(2L, 2L))
+  expect_equal(nrow(multiple$first_stage_diagnostics), 2)
+  expect_identical(unserialize(serialize(multiple, NULL)), multiple)
+
+  z <- matrix(0, 40, 5); z[1:20, 2:5] <- 1
+  d <- matrix(0, 40, 5); d[c(1:15, 21:25), 2:5] <- 1
+  y <- t(apply(d, 1, cumsum)) + row(d)
+  singular <- duration_deconvolution_effects(y, d, z)
+  expect_true(is.nan(singular$first_stage_f))
+  expect_identical(singular$first_stage_status, "singular_cluster_covariance")
+  expect_identical(singular$first_stage_diagnostics$status, "singular_cluster_covariance")
+  expect_true(is.nan(singular$first_stage_diagnostics$cluster_wald_f))
+  expect_identical(unserialize(serialize(singular, NULL)), singular)
+
+  perfect <- duration_deconvolution_effects(2 * t(apply(z, 1, cumsum)), z, z)
+  expect_identical(perfect$first_stage_f, Inf)
+  expect_identical(perfect$first_stage_status, "perfect_fit")
+})
+
+test_that("duration_deconvolution_effects rejects invalid time and fractional duration", {
+  skip_without_engine()
+  p <- encourage_panel()
+  expect_error(duration_deconvolution_effects(p$y, p$d, p$z,
+    t = c(0, 1, 3, 4)), "equally spaced")
+  expect_error(duration_deconvolution_effects(p$y, p$d, p$z,
+    t = c(0, 1, 1, 2)), "strictly increasing")
+  expect_error(duration_deconvolution_effects(p$y, p$d, p$z,
+    max_duration = 1.5), "positive integer")
+  standard <- duration_deconvolution_effects(p$y, p$d, p$z)
+  calendar <- duration_deconvolution_effects(p$y, p$d, p$z, t = 2000 + 7 * (0:3))
+  expect_identical(calendar, standard)
 })

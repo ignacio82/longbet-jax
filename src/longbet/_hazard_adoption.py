@@ -1,18 +1,21 @@
-"""Discrete-time hazard adoption model with spike-and-slab first-stage relevance.
+"""Experimental discrete-time hazard adoption forest with a relevance indicator.
 
 Models the dynamic adoption hazard on the active longitudinal risk set:
     lambda_{it}(z) = Pr(D_{it} = 1 | D_{i, t-1} = 0, Z_i = z, X_i)
                    = Phi(m_d(X_i, t) + (z - p) * 1(t >= t_0) * xi * tau_d(X_i, t - t_0))
 
-Adoption is naturally absorbing:
-    D_{it}(z) = 1 - prod_{s <= t} (1 - lambda_{is}(z))
+The modeled adoption stock probability is:
+    Pr(D_{it}(z) = 1 | X_i) = 1 - prod_{s <= t} (1 - lambda_{is}(z))
 
-Cumulative treatment exposure duration is:
-    E_{it}(z) = sum_{s <= t} D_{is}(z)
+Expected cumulative treatment exposure is:
+    E[sum_{s <= t} D_{is}(z) | X_i] = sum_{s <= t} Pr(D_{is}(z) = 1 | X_i)
 
-The spike-and-slab indicator xi in {0, 1} places non-zero prior mass on the exact null
-(xi = 0, no effect of encouragement on uptake), eliminating the weak-instrument bias
-and false precision of continuous ordered priors.
+An indicator xi in {0, 1} permits exactly zero encouragement effects. This alone
+does not identify an outcome effect or eliminate weak-instrument bias. One random
+stump basis is fixed and shared across chains; tree partitions are not learned.
+Probit utilities, baseline leaves, and a collapsed relevance/effect block target
+the posterior conditional on that basis. Posterior interval calibration remains
+unestablished, and convergence and sensitivity to the basis and priors matter.
 """
 from __future__ import annotations
 
@@ -23,9 +26,11 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from scipy.special import log_ndtr, logsumexp, ndtr, ndtri_exp
+from scipy.linalg import cho_solve, solve_triangular
+from scipy.special import expit, log_ndtr, logit, ndtr, ndtri_exp
 
 from longbet._encourage import _critical, _validate
+from longbet._encourage_model import _finite_matrix
 
 
 @dataclass(frozen=True)
@@ -78,14 +83,20 @@ class HazardConfig:
 
 @dataclass(frozen=True)
 class HazardAdoptionResult:
-    """Summary and posterior draws from the Discrete-Time Hazard Adoption Model.
+    """Working-model summaries and traces conditional on a fixed random basis.
 
     ``table`` includes:
     - ``period``, ``horizon``
-    - ``hazard_itt``: effect of encouragement on period adoption hazard among survivors
-    - ``stock_itt``: cumulative adoption stock difference
-    - ``exposure_itt``: cumulative exposure duration contrast
-    - ``relevance_prob``: posterior probability Pr(xi = 1 | data)
+    - ``hazard_itt``: modeled hazard contrast averaged over original baseline units
+    - ``stock_itt``: modeled adoption stock probability difference
+    - ``exposure_itt``: modeled expected cumulative exposure contrast
+    - ``relevance_prob``: estimate of posterior Pr(xi = 1 | data, fixed basis)
+
+    The hazard contrast is not a comparison restricted to one common set of
+    counterfactual survivors. Stock and exposure summaries require the working
+    hazard specification, including its treatment of baseline adoption.
+    Neither interval calibration nor sampler convergence follows from these
+    summaries; the relevance probability is not a test of IV identification.
     """
 
     table: pd.DataFrame
@@ -101,11 +112,59 @@ def _utility_draw(rng: np.random.Generator, eta: np.ndarray, response: np.ndarra
     return sign * (signed - ndtri_exp(log_ndtr(signed) + np.log(uniform)))
 
 
+def _effect_block_parameters(
+    residual: np.ndarray, risk: np.ndarray, basis: np.ndarray, leaf_variance: float,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Gaussian effect conditionals and log slab/spike marginal likelihood ratio.
+
+    Each period has independent N(0, leaf_variance I) coefficients. The returned
+    means and Cholesky precision factors use coefficients whitened by the prior.
+    All redundant and inactive basis columns remain proper augmented parameters.
+    """
+    horizons, columns = residual.shape[1], basis.shape[1]
+    means = np.empty((horizons, columns))
+    cholesky = np.empty((horizons, columns, columns))
+    log_bayes_factor = 0.0
+    for h in range(horizons):
+        design = np.sqrt(leaf_variance) * basis[risk[:, h]]
+        response = residual[risk[:, h], h]
+        precision = np.eye(columns) + design.T @ design
+        rhs = design.T @ response
+        chol = np.linalg.cholesky(precision)
+        means[h] = cho_solve((chol, True), rhs, check_finite=False)
+        cholesky[h] = chol
+        log_bayes_factor += 0.5 * rhs @ means[h] - np.log(np.diag(chol)).sum()
+    return means, cholesky, float(log_bayes_factor)
+
+
+def _sample_effect_block(
+    rng: np.random.Generator, residual: np.ndarray, risk: np.ndarray,
+    basis: np.ndarray, leaf_variance: float, prior_inclusion_prob: float,
+) -> tuple[int, np.ndarray]:
+    """Joint relevance/leaf Gibbs draw; inactive effects follow their prior."""
+    means, cholesky, log_bayes_factor = _effect_block_parameters(
+        residual, risk, basis, leaf_variance,
+    )
+    probability = expit(logit(prior_inclusion_prob) + log_bayes_factor)
+    xi = int(rng.random() < probability)
+    normal = rng.normal(size=means.shape)
+    if xi:
+        for h in range(len(means)):
+            normal[h] = means[h] + solve_triangular(
+                cholesky[h].T, normal[h], lower=False, check_finite=False,
+            )
+    return xi, np.sqrt(leaf_variance) * normal.T
+
+
 class HazardAdoptionForest:
-    """Discrete-Time Hazard Model with Spike-and-Slab First-Stage Relevance."""
+    """Experimental fixed-basis probit hazard model; calibration is unestablished."""
 
     def __init__(self, config: HazardConfig | None = None, **kwargs: Any):
-        self.config = config or HazardConfig(**kwargs)
+        if config is not None and not isinstance(config, HazardConfig):
+            raise TypeError("config must be a HazardConfig or None.")
+        if config is not None and kwargs:
+            raise ValueError("Pass either config or HazardConfig keyword options.")
+        self.config = config if config is not None else HazardConfig(**kwargs)
         self.draws: dict[str, np.ndarray] = {}
         self.fitted_ = False
         self.metadata: dict[str, Any] = {}
@@ -122,16 +181,24 @@ class HazardAdoptionForest:
         burnin: int = 400,
         draws: int = 600,
     ) -> HazardAdoptionForest:
+        for name, value, minimum in (("seed", seed, 0), ("chains", chains, 1),
+                                     ("burnin", burnin, 0), ("draws", draws, 1)):
+            if (isinstance(value, (bool, np.bool_)) or
+                    not isinstance(value, (int, np.integer)) or value < minimum):
+                raise ValueError(f"{name} must be an integer >= {minimum}.")
         panel = _validate(z, d, t)
         n, periods = panel.d.shape
         start = panel.start
         times = panel.t
         assignment = panel.assigned.astype(float)
         centered_z = assignment - np.mean(assignment)
-        x_arr = np.asarray(x, dtype=float)
+        x_arr = _finite_matrix(x, "x", n)
+        if periods > 2 and not np.allclose(np.diff(times), np.diff(times)[0], rtol=1e-10, atol=0):
+            raise ValueError("The hazard model requires equally spaced observed periods.")
 
         # Build risk set: unit i is at risk in period t if D_{i, t-1} == 0.
-        # For t=0, all units with D_{i, 0} == 0 at baseline (or pre-adoption) are at risk.
+        # At the first observation all units are at risk: baseline adopters are
+        # treated as first-period events, rather than left-truncated histories.
         risk = np.ones((n, periods), dtype=bool)
         for j in range(1, periods):
             risk[:, j] = panel.d[:, j - 1] == 0
@@ -157,11 +224,19 @@ class HazardAdoptionForest:
         base_leaf_var = (self.config.baseline_sd ** 2) / self.config.baseline_trees
         eff_leaf_var = (self.config.effect_sd ** 2) / self.config.effect_trees
 
+        # Condition on one random feature basis. Different fixed bases in each
+        # chain would target different conditional posteriors and could not be
+        # treated as replicated chains of a single posterior.
+        basis_seed, sampler_seed = np.random.SeedSequence(seed).spawn(2)
+        basis_rng = np.random.default_rng(basis_seed)
+        base_rules = basis_rng.choice(n_rules, size=self.config.baseline_trees, p=np.exp(space.log_prior))
+        eff_rules = basis_rng.choice(n_rules, size=self.config.effect_trees, p=np.exp(space.log_prior))
+        effect_basis = space.mask[eff_rules].transpose(2, 0, 1).reshape(n, -1) * centered_z[:, None]
+        chain_seeds = sampler_seed.spawn(chains)
+
         for c in range(chains):
-            rng = np.random.default_rng(seed + c * 10007)
-            base_rules = rng.choice(n_rules, size=self.config.baseline_trees, p=np.exp(space.log_prior))
+            rng = np.random.default_rng(chain_seeds[c])
             base_leaves = np.zeros((self.config.baseline_trees, 2, periods))
-            eff_rules = rng.choice(n_rules, size=self.config.effect_trees, p=np.exp(space.log_prior))
             eff_leaves = np.zeros((self.config.effect_trees, 2, h))
             base_fits = np.zeros((self.config.baseline_trees, n, periods))
             eff_fits = np.zeros((self.config.effect_trees, n, h))
@@ -196,39 +271,19 @@ class HazardAdoptionForest:
                                 base_leaves[tr, l, t_idx] = rng.normal(scale=np.sqrt(base_leaf_var))
                     base_fits[tr] = m.T @ base_leaves[tr]
 
-                # 3. Update effect trees
+                # 3. Integrate the effect leaves to sample relevance, then draw
+                # all leaves jointly under that state. No BIC-like penalty is
+                # needed: the Gaussian marginal likelihood supplies the prior's
+                # actual complexity adjustment.
                 eta_base = base_fits.sum(axis=0)
-                eff_val = np.zeros((n, h))
-                for tr in range(self.config.effect_trees):
-                    m = space.mask[eff_rules[tr]]
-                    res = (u[:, start:] - eta_base[:, start:]) - (eff_fits.sum(axis=0) - eff_fits[tr])
-                    for h_idx in range(h):
-                        t_idx = start + h_idx
-                        at_risk_t = risk[:, t_idx]
-                        for l in (0, 1):
-                            idx = at_risk_t & (m[l] == 1)
-                            w = centered_z[idx]
-                            count = np.sum(w ** 2)
-                            if count > 0:
-                                post_var = 1.0 / (1.0 / eff_leaf_var + count)
-                                post_mean = post_var * np.sum(w * res[idx, h_idx])
-                                eff_leaves[tr, l, h_idx] = post_mean + np.sqrt(post_var) * rng.normal()
-                            else:
-                                eff_leaves[tr, l, h_idx] = rng.normal(scale=np.sqrt(eff_leaf_var))
-                    fit_tr_raw = m.T @ eff_leaves[tr]
-                    eff_val += fit_tr_raw
-                    eff_fits[tr] = fit_tr_raw * centered_z[:, None]
-
-                # 4. Spike-and-slab update for xi
-                eff_sum = eff_fits.sum(axis=0)
-                res_zero = (u[:, start:] - eta_base[:, start:])[risk[:, start:]]
-                res_one = (u[:, start:] - (eta_base[:, start:] + eff_sum))[risk[:, start:]]
-                n_active = len(res_one)
-                pen = 0.5 * self.config.effect_trees * np.log(max(n_active, 10))
-                loglik_0 = -0.5 * np.sum(res_zero ** 2) + np.log(1.0 - self.config.prior_inclusion_prob)
-                loglik_1 = -0.5 * np.sum(res_one ** 2) - pen + np.log(self.config.prior_inclusion_prob)
-                p_one = 1.0 / (1.0 + np.exp(np.clip(loglik_0 - loglik_1, -50.0, 50.0)))
-                xi = int(rng.binomial(1, p_one))
+                xi, coefficients = _sample_effect_block(
+                    rng, u[:, start:] - eta_base[:, start:], risk[:, start:],
+                    effect_basis, eff_leaf_var, self.config.prior_inclusion_prob,
+                )
+                eff_leaves = coefficients.reshape(self.config.effect_trees, 2, h)
+                raw_effects = np.einsum("jln,jlt->jnt", space.mask[eff_rules], eff_leaves)
+                eff_val = raw_effects.sum(axis=0)
+                eff_fits = raw_effects * centered_z[None, :, None]
 
                 # 6. Save draws if past burn-in
                 if it >= burnin:
@@ -279,6 +334,19 @@ class HazardAdoptionForest:
             chains=chains,
             draws=draws,
             burnin=burnin,
+            seed=int(seed),
+            inference_version="hazard_fixed_basis_v2",
+            experimental=True,
+            calibration_status="not_established",
+            topology="fixed_random_stumps_shared_across_chains",
+            baseline_rules=base_rules.tolist(),
+            effect_rules=eff_rules.tolist(),
+            posterior_conditioning="observed_data_and_fixed_random_basis",
+            relevance_interpretation="model_posterior_inclusion_probability_conditional_on_fixed_basis",
+            sampler="probit_utilities_and_collapsed_relevance_effect_block",
+            weak_instrument_robust=False,
+            causal_outcome_inference_supported=False,
+            duration_unit="observed_period",
         )
         self.panel = panel
         self.fitted_ = True
@@ -325,7 +393,11 @@ def hazard_adoption_effects(
     draws: int = 600,
     alpha: float = 0.05,
 ) -> HazardAdoptionResult:
-    """Convenience function to fit hazard adoption model and return summary."""
+    """Fit the experimental fixed-basis hazard model and return summaries.
+
+    Probabilities and credible intervals condition on a fixed random stump basis.
+    Calibration is unestablished; relevance does not validate IV identification.
+    """
     forest = HazardAdoptionForest(config=config)
     if x is None:
         x = np.ones((len(z), 1))

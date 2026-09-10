@@ -11,9 +11,10 @@ is **not established**. An explicit `first_stage` choice is required. Check the
 posterior ratios. Passing an ESS or R-hat threshold does not establish coverage.
 
 The follow-up [sampler repair study](../benchmarks/encouragement/repair-report.md)
-contains working research candidates with direct smooth effects and joint
-Gaussian updates. They pass the reported mixing checks in the tested settings,
-but have not become a public fitting backend or established interval coverage.
+contains earlier research candidates. The repaired direct-smoothing model is now
+available as `engine="direct_smooth"`, with explicit `direct_config` controls.
+Its sampling tests and the [matched comparison protocol](../benchmarks/encouragement/comparison-protocol.md)
+separate computational correctness from empirical accuracy and coverage.
 
 ## Data and interpretation
 
@@ -283,168 +284,201 @@ adaptive re-randomization, missing panels and nonabsorbing adoption are outside
 this contract. These cases need their actual design covariance and identification
 argument, rather than a generic staggered-IV label.
 
-## Randomization-based Anderson-Rubin inference
+## Randomization-based Anderson–Rubin inference
 
-When the first stage may be weak, asymptotic Wald ratios can suffer from severe distortion. `randomization_ar` inverts an exact finite-sample randomization test of $H_0: \beta = \beta_0$ on the adjusted residual $Y_i(t) - \beta_0 D_i(t)$ using test statistic $T(\beta_0) = |\bar{R}_1 - \bar{R}_0|$:
+`randomization_ar` tests candidate values under the sharp exclusion null
+`Y_i(1,t) - Y_i(0,t) = beta * (D_i(1,t) - D_i(0,t))`, using complete individual
+randomization with fixed arm counts. Random assignment alone does not make this
+a test of an arbitrary heterogeneous average effect. With duration effects,
+apply it only at horizons where the specified current-adoption null is valid.
+For a baseline and first follow-up in columns 0 and 1:
 
 ```python
 from longbet import randomization_ar
+import numpy as np
 
-ar_res = randomization_ar(
-    y=y, d=d, z=z, t=t,
-    horizon=1,
-    alpha=0.05,
-    n_perms=2000,
-    grid_size=200,
-    grid_min=-5.0,
-    grid_max=5.0,
-    seed=42,
-)
-
-print(ar_res.confidence_intervals)  # Disjoint or continuous accepted intervals
-print(ar_res.is_unbounded)          # True if grid boundaries remain accepted
+ar = randomization_ar(y[:, :2], d[:, :2], z[:, :2],
+    beta=np.arange(-5, 5.01, .1), method="monte_carlo",
+    permutations=1999, seed=42)
+print(ar.table)
 ```
 
-## Nonparametric and encouragement identification bounds
+Enumeration is exact under this sharp null; Monte Carlo uses a plus-one p-value.
+The returned table covers only evaluated candidates. Preserve separate accepted
+grid runs. Acceptance at a grid boundary does not establish an infinite tail,
+and Monte Carlo p-value bounds are not treatment-effect intervals.
 
-Under weak IV or imperfect compliance, point identification of CACE fails without strong monotonicity and exclusion restrictions. `encouragement_bounds` computes Manski worst-case bounds, Balke-Pearl sharp natural bounds under exclusion and monotonicity, and sensitivity bounds against direct instrument effects:
+## Binary principal-stratum bounds
+
+`encouragement_bounds` takes binary outcome, adoption, and assignment vectors.
+It assumes monotone adoption and bounds the direct effect of encouragement on
+outcome probabilities by `delta`: zero imposes exclusion; one leaves direct
+effects unrestricted. Prespecify any threshold for a continuous outcome.
 
 ```python
 from longbet import encouragement_bounds
 
-bounds = encouragement_bounds(
-    y=y, d=d, z=z,
-    y_min=0.0, y_max=1.0,
-    delta_direct=0.05,  # Allow up to 0.05 direct instrument violation
-)
-
-print("Manski bounds:", bounds.manski_bounds)
-print("Balke-Pearl bounds:", bounds.balke_pearl_bounds)
-print("Sensitivity bounds:", bounds.sensitivity_bounds)
+bounds = encouragement_bounds(y_binary, d_at_horizon, assigned,
+    delta=.1, draws=2000, chains=4, seed=42)
+print(bounds.table)
+print(bounds.metadata)
 ```
 
-## Direct joint Gaussian forest & correlated intercepts
+Read median identification endpoints separately from their posterior uncertainty.
+`[lower_ci_lower, upper_ci_upper]` is an envelope of endpoint quantiles, not an
+automatically calibrated confidence interval. Report available and compatible
+draw fractions; they are posterior summaries, not specification-test p-values.
+These bounds target the three named complier estimands, not an unrestricted ATE.
 
-To overcome MCMC mixing degradation in joint continuous-discrete product forests, `LongBetDirectSmooth` fits smooth Gaussian processes directly for $(Y, D)$ using exact Gibbs sampling. Correlated random intercepts ($\boldsymbol{\Sigma}_\gamma \sim \text{IW}$) learn the longitudinal cross-equation ITT covariance directly:
+## Direct smooth Gaussian reduced forms
+
+The direct backend fits assignment effects using sums of Gaussian-process stump
+leaves. It integrates baseline and unit-intercept blocks and jointly samples
+effect leaves. The repaired implementation averages unweighted counterfactual
+contrasts over all fitted units. Optional correlated unit intercepts use the
+other equation's current conditional prior mean and variance.
 
 ```python
-from longbet import LongBetEncourage, LongBetDirectSmooth, DirectSmoothConfig
+from longbet import LongBetEncourage, LongBetConfig, DirectSmoothConfig
 
-# Either configure via LongBetEncourage engine:
 fit = LongBetEncourage(
-    engine="direct_smooth",
-    correlated_intercepts=True,
-    num_trees=30,
-    num_sweeps=200,
-    num_burnin=50,
+    LongBetConfig(num_chains=4, num_burnin=500, num_sweeps=1000, random_seed=42),
+    first_stage="lpm", engine="direct_smooth",
+    direct_config=DirectSmoothConfig(baseline_trees=4, effect_trees=4,
+                                    correlated_intercepts=False),
 ).fit(y, d, z, x, t=t)
-
-# Or directly via LongBetDirectSmooth:
-cfg = DirectSmoothConfig(num_trees=30, num_sweeps=200, correlated_intercepts=True)
-model = LongBetDirectSmooth(cfg).fit(y, d, z, x, t=t)
-preds = model.predict(groups=baseline_group)
-print(preds.itt_covariance())
+pred = fit.predict()
+print(pred.effects())
+print(pred.wald())
+fit.save("direct-encouragement.npz")
+replayed = LongBetEncourage.load("direct-encouragement.npz").predict()
 ```
 
-## Discrete-time hazard adoption & spike-and-slab relevance
+```r
+fit <- longbet_encourage(y, d, z, x, t = t, first_stage = "lpm",
+  engine = "direct_smooth",
+  direct_config = list(baseline_trees = 4L, effect_trees = 4L,
+                       correlated_intercepts = FALSE),
+  config = list(num_chains = 4L, num_burnin = 500L,
+                num_sweeps = 1000L, random_seed = 42L))
+pred <- predict(fit)
+encouragement_wald(pred)
+```
 
-In longitudinal settings where adoption timing is accelerated by encouragement, static LPM or probit models suffer from survival conditioning bias. `hazard_adoption_effects` fits a discrete-time hazard forest on the dynamic risk set $\mathcal{R}_t = \{i: D_{i, t-1} = 0\}$ with an exact spike-and-slab indicator $\xi \sim \text{Bernoulli}$ over instrument relevance:
+This backend supports continuous outcomes, an LPM first stage, and summaries for
+the fitted population. It rejects binary/probit, subgroup and new-covariate
+prediction requests. Forest and prior options belong in `direct_config`;
+`config` supplies sampling controls. Serialized fits preserve covariance traces.
+
+The working Gaussian adoption likelihood does not represent all dependence
+created by absorbing binary adoption. Correlated intercepts model a shared unit
+component but do not establish the whole joint error distribution. ESS and R-hat
+assess computation, not likelihood adequacy or coverage. The matched benchmark
+uses independent intercepts as its prespecified primary model; different priors
+or forest sizes require separate evaluation.
+
+## Adoption hazard as an exploratory first stage
 
 ```python
 from longbet import hazard_adoption_effects, HazardConfig
 
-hazard_res = hazard_adoption_effects(
-    d=d, z=z, x=x, t=t,
-    config=HazardConfig(num_trees=20, num_sweeps=100, slab_var=1.0, spike_prob=0.5),
-)
-
-print("Instrument relevance posterior mean P(xi=1|data):", hazard_res.xi_inclusion_prob)
-print("Hazard acceleration log odds ratio:", hazard_res.tau_post.mean())
-print("Expected adoption survival probability:", hazard_res.adoption_survival)
+hazard = hazard_adoption_effects(d, z, x, t=t,
+    config=HazardConfig(trees=4), chains=4, burnin=500, draws=1000, seed=42)
+print(hazard.table)
+print(hazard.metadata)
 ```
 
-## Structural treatment-clock duration deconvolution
+```r
+hazard <- hazard_adoption_effects(d, z, x, t = t,
+  trees = 4L, chains = 4L, burnin = 500L, draws = 1000L, seed = 42L)
+hazard$table
+```
 
-When encouragement accelerates adoption timing, both encouraged and control units may eventually adopt (e.g. $D_{it}(1) = D_{it}(0) = 1$ at later horizons). In this setting, static adoption-stock first stages $\text{ITT}_d(t)$ vanish to zero, causing standard Wald ratios to divide by zero and diverge, even though treated units experienced strictly greater cumulative exposure duration.
+The hazard likelihood respects absorbing adoption. Its risk set contains units
+not yet adopted, a group whose composition can depend on assignment. A hazard
+contrast needs assumptions beyond randomization for causal interpretation.
+Compare implied population adoption-stock and exposure contrasts with reference
+ITTs. The relevance probability is model- and prior-dependent; it does not
+eliminate weak-instrument bias or supply robust treatment-effect intervals.
+This exploratory module is excluded from the superiority benchmark.
 
-`duration_deconvolution_effects` models the structural outcome response as a function of cumulative exposure duration:
-$$Y_{it} = \alpha_i + \lambda_t + g(\text{duration}_{it}) + \varepsilon_{it}$$
-where $\text{duration}_{it} = \sum_{s \le t} D_{is}$. The endogenous duration path is instrumented using the interaction of assigned encouragement $Z_i$ with post-encouragement exposure time:
+## A common duration response using conventional panel 2SLS
+
+When encouragement accelerates adoption, a current-adoption denominator may
+vanish while cumulative exposure differs. Define `S_it = sum_{s<=t} D_is`
+and explicitly posit `Y_it = alpha_i + lambda_t + g(S_it) + error_it`.
+`duration_deconvolution_effects` uses assignment-by-post-wave instruments after
+absorbing unit and time effects:
 
 ```python
 from longbet import duration_deconvolution_effects
 
-res = duration_deconvolution_effects(
-    y=y, d=d, z=z, t=t,
-    model_type="linear",  # "linear", "stepwise", or "spline"
-    alpha=0.05,
-)
-
-print(res.summary_table)
-print("Estimated marginal effect per period of exposure:", res.effects[0])
-print("First-stage F-statistic for duration:", res.first_stage_f)
+result = duration_deconvolution_effects(y, d, z, t=t, model_type="linear")
+print(result.summary_table)
+print(result.instrument_rank, result.regressor_rank)
+print(result.first_stage_diagnostics)
 ```
 
-## Coupled joint hazard-outcome IV model
+```r
+result <- duration_deconvolution_effects(y, d, z, t = t, model_type = "linear")
+result$summary_table
+result$first_stage_diagnostics
+```
 
-`CoupledHazardIV` unifies discrete-time hazard modeling for adoption timing on the active risk set $\mathcal{R}_t$ with a structural outcome response equation:
-- **Stage 1 (Adoption Hazard on Risk Set $\mathcal{R}_t$)**:
-  $$U_{it}^* = \mu_{d, t} + \xi \cdot \tau_d Z_i + \varepsilon_{d, it}, \quad D_{it} = \mathbb{I}(U_{it}^* > 0) \quad (i \in \mathcal{R}_t)$$
-  $$\xi \sim \text{Bernoulli}(\pi_0) \quad \text{(spike-and-slab relevance prior)}$$
-- **Stage 2 (Structural Outcome)**:
-  $$Y_{it} = \mu_{y, t} + \beta D_{it} + \rho_{CF} r_{it} + \nu_{it}$$
-where $r_{it} = D_{it} - \hat{D}_{it}$ is the generalized adoption control function residual that purges unobserved endogeneity between adoption decisions and outcome shocks.
+This is unregularized 2SLS under a common structural response, not a new source
+of identification. It rejects deficient rank and nonzero ridge penalties and
+requires finite balanced panels, binary absorbing indicators, common assignment
+onset and equally spaced periods. Duration counts observed periods. `linear`
+estimates one slope; `stepwise` estimates cumulative duration increments;
+`quadratic` uses duration and its square. The legacy `spline` alias is quadratic
+and has no knots.
+
+Unit-cluster CR1 covariance counts absorbed fixed effects in the residual degrees
+of freedom; pointwise intervals use t(N−1) critical values. Units must be
+independent assignment/sampling clusters. Scalar `first_stage_f` is a cluster
+Wald statistic divided by instrument rank, not the homoskedastic F statistic.
+Multiple regressors have separate diagnostics but no single joint-strength
+statistic here. Singular cluster covariance is explicitly unavailable. These
+intervals still require strong instruments and enough independent units;
+randomization alone does not identify unrestricted heterogeneous duration effects.
+
+## Experimental modular hazard–outcome model
+
+`CoupledHazardIV` is retained as a modular working model. Its hazard module is
+fit without outcome feedback; its outcome module samples the exact conditional
+Gaussian regression on adoption and `D - Dhat`, with time effects. This is a
+cut distribution, not a joint hazard–outcome posterior.
 
 ```python
 from longbet import CoupledHazardIV, CoupledHazardConfig
 
-cfg = CoupledHazardConfig(num_sweeps=150, num_burnin=50, prior_pi0=0.5)
-model = CoupledHazardIV(cfg)
-res = model.fit(y=y, d=d, z=z)
-
-print("Causal treatment effect beta:", res.beta_mean, "95% CI:", res.beta_ci)
-print("Unobserved endogeneity rho_cf:", res.rho_mean)
-print("Instrument relevance inclusion prob:", res.xi_inclusion_prob)
+experimental = CoupledHazardIV(CoupledHazardConfig(
+    num_sweeps=1000, num_burnin=500, seed=42)).fit(y, d, z, t=t)
+print(experimental.summary_table)  # working regression coefficients
+print(experimental.metadata)
+assert experimental.causal_ci is None
 ```
 
-## Simulation-based calibration (SBC) suite
+`D - Dhat` is not generally a valid control function for endogenous binary
+adoption. At zero relevance, it and adoption are collinear after time effects,
+so the likelihood cannot separate their coefficients. Proper priors can give
+finite draws without causal identification. The implementation warns and
+withholds causal intervals for every fit. Legacy `beta_ci` describes only the
+working coefficient. Covariate adjustment is unsupported and rejected.
 
-To rigorously assess interval coverage across instrument strengths, the benchmark script in `benchmarks/encouragement/sbc_calibration.py` runs systematic evaluations across weak ($F < 5$), moderate ($F \approx 10-15$), and strong ($F > 25$) regimes:
+## Repeated-sampling evaluation
 
-```bash
-python benchmarks/encouragement/sbc_calibration.py --replications 50 --output benchmarks/encouragement/sbc_report.json
-```
+The historical filename `sbc_calibration.py` now describes its actual task as
+fixed-parameter coverage, not Bayesian simulation-based calibration. It uses
+known binary-outcome targets, checks truth containment, preserves disjoint grid
+runs, reports truncation, and never pads intervals. Exploratory coupled-model
+summaries are marked as lacking supported causal coverage. Older numerical
+claims from the unrepaired script are invalid evidence.
 
-Key empirical findings:
-1. **Randomization AR** maintains exact nominal $\ge 95\%$ frequentist coverage uniformly across all instrument strengths, remaining valid even under severely weak instruments.
-2. **Asymptotic Wald ratios** exhibit severe undercoverage and interval distortion when first-stage $F < 10$.
-3. **Coupled Hazard IV with spike-and-slab** prevents parameter explosions and stabilizes posterior inference when instruments lack relevance.
-
-## Native R interface
-
-All new modules are exported natively in R with matching S3 signatures:
-
-```r
-library(longbet)
-
-# 1. Exact finite-sample Randomization AR test
-ar_res <- randomization_ar(y, d, z, beta = seq(-3, 3, by = 0.1), permutations = 1000L)
-print(ar_res$table)
-
-# 2. Nonparametric sharp identification bounds
-bounds <- encouragement_bounds(y_binary, d, z, delta = 1.0)
-print(bounds$table)
-
-# 3. Structural duration deconvolution
-deconv <- duration_deconvolution_effects(y, d, z, model_type = "linear")
-print(deconv$summary_table)
-
-# 4. Discrete-time hazard adoption model
-hazard <- hazard_adoption_effects(d, z, num_trees = 20L, num_sweeps = 100L)
-print(hazard$xi_inclusion_prob)
-
-# 5. Direct joint Gaussian forest
-fit <- longbet_direct_smooth(y, d, z, x, num_trees = 30L, num_sweeps = 200L)
-```
-
-
+The [matched comparison](../benchmarks/encouragement/comparison-protocol.md) uses
+separate pilot and evaluation seeds, the same finite-population estimands for
+all methods, and unadjusted, linear-ANCOVA and spline-ANCOVA IV comparators.
+It records failures and diagnostics, pointwise coverage with Monte Carlo
+uncertainty, complete Fieller sets, paired accuracy comparisons and runtime.
+A sampler repair, narrower intervals, or a correct exposure definition does not
+by itself demonstrate improvement over established IV alternatives.

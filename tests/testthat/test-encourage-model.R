@@ -109,6 +109,48 @@ test_that("config options preserve proper defaults and reject accidental coercio
   expect_error(encouragement_wald(structure(list(), class = "longbet_encourage.pred"), NA), "TRUE or FALSE")
 })
 
+test_that("direct smooth R engine honors sampling controls and replays its archive", {
+  skip_without_engine()
+  set.seed(172)
+  n <- 12L
+  z <- matrix(0, n, 3); z[1:6, 2:3] <- 1
+  x <- matrix(rnorm(n), n, 1)
+  y <- 2 * z + x[, 1] + matrix(rnorm(n * 3), n, 3)
+  args <- list(y = y, d = z, z = z, x = x, first_stage = "lpm",
+               engine = "direct_smooth",
+               config = list(num_chains = 2, num_burnin = 2, num_sweeps = 8,
+                             n_skip = 2, random_seed = 53),
+               direct_config = list(baseline_trees = 1, effect_trees = 1,
+                                    correlated_intercepts = TRUE))
+  fit <- do.call(longbet_encourage, args)
+  expect_false(contains_python_handle(fit))
+  expect_equal(fit$metadata$sampler$draws, 8)
+  expect_equal(fit$metadata$sampler$n_skip, 2)
+  expect_equal(fit$metadata$unit_intercept_covariance, "inverse_wishart")
+  pred <- predict(fit)
+  expect_equal(dim(pred$draws$itt_y), c(1L, 2L, 2L, 8L))
+  path <- tempfile(fileext = ".rds")
+  on.exit(unlink(path), add = TRUE)
+  saveRDS(fit, path)
+  replay <- predict(readRDS(path))
+  expect_identical(replay$draws, pred$draws)
+  expect_identical(replay$diagnostics, pred$diagnostics)
+  expect_output(print(fit), "continuous outcome, lpm first stage")
+  convenience <- longbet_direct_smooth(y, z, z, x, num_trees = 1,
+    num_chains = 2, num_burnin = 2, num_sweeps = 8, n_skip = 2, seed = 53)
+  expect_s3_class(convenience, "longbet_encourage")
+  expect_false(contains_python_handle(convenience))
+  expect_identical(predict(convenience)$draws, pred$draws)
+  expect_error(longbet_direct_smooth(y, z, z, x, num_sweeps = 1.5), "finite integer")
+  expect_error(predict(fit, groups = rep("a", n)), "groups are unsupported")
+  expect_error(predict(fit, summary_only = FALSE), "summary_only")
+  args$first_stage <- "probit"
+  expect_error(do.call(longbet_encourage, args), "requires first_stage")
+  args$first_stage <- "lpm"
+  args$direct_config$baseline_trees <- 1.5
+  expect_error(do.call(longbet_encourage, args), "finite integer")
+})
+
 test_that("design-based R inference preserves covariance labels and serialization", {
   skip_without_engine()
   p <- encourage_model_fixture()

@@ -150,14 +150,34 @@ of the signed Wald ratio, never a default ratio mean or a trimmed denominator.
 
 Posterior interval calibration is **not established**: the benchmark compares
 joint/separate LPM/probit fits, longer chains and correlated-intercept candidates,
-and retains mixing and coverage failures. SUR couples innovations while the
-production unit-intercept priors remain independent across outcomes. A passing
-diagnostic alone does not validate a posterior ratio. A treatment-clock
-structural model remains outside this release under the plan's identification
-requirements.
+and retains mixing and coverage failures. With `engine="longbet"`, SUR couples
+innovations while unit-intercept priors remain independent across outcomes.
+The alternative `engine="direct_smooth"` samples smooth Gaussian stump leaves and
+can learn cross-equation unit-intercept covariance; its innovation errors remain
+independent. It supports continuous outcomes and an LPM first stage. A passing
+diagnostic alone does not validate a posterior ratio or establish an advantage
+over conventional IV.
+
+`duration_deconvolution_effects()` now provides unregularized panel 2SLS for a
+common duration-response model, with explicit rank checks and unit-cluster
+covariance. It requires structural assumptions about treatment history and
+strong instruments for its conventional intervals. The experimental hazard
+forest conditions on a fixed random stump basis; it does not establish IV
+identification or weak-instrument-robust inference.
 With binary Y and probit adoption, innovation loadings are fixed to zero in both
 equations; the default separate-forest posteriors are independent even when
 `sur=True`. This limitation is recorded in model metadata and calibration results.
+
+**IV implementation review, 2026-09-10:** the repaired direct-smoothing model is
+being assessed under a [matched IV comparison protocol](benchmarks/encouragement/comparison-protocol.md).
+The [benchmark correction record](benchmarks/encouragement/README.md#implementation-and-metric-correction-2026-09-10)
+documents invalid metrics in the old `sbc_calibration.py`: binary-set nonemptiness
+and padded hazard intervals were incorrectly reported as coverage. The corrected
+script separates known binary and continuous targets and is explicitly a
+fixed-parameter repeated-sampling experiment, not SBC. `CoupledHazardIV` remains
+an experimental modular working model; it returns no supported causal interval
+(`causal_ci=None`). Neither finite working-model intervals nor successful sampler
+diagnostics establish an advantage over conventional IV.
 
 The [encouragement guide](docs/encouragement-guide.md) includes matching Python/R
 examples for subgroups, blocked and cluster targets, known probabilities,

@@ -209,9 +209,13 @@ encouragement_bounds <- function(y, d, z, x = NULL, delta = 1.0,
   list(table = tbl, metadata = .encouragement_as_r(result$metadata))
 }
 
-#' Discrete-time hazard adoption model with spike-and-slab relevance
+#' Experimental discrete-time hazard adoption forest
 #'
-#' Models adoption hazard on the active risk set with exact spike-and-slab relevance indicator.
+#' Models adoption hazard on the active risk set with a relevance indicator.
+#' One seeded random stump basis is fixed and shared across chains. Probit
+#' utilities and a collapsed relevance/effect block target the posterior
+#' conditional on this basis. Calibration is unestablished, and a relevance
+#' probability does not establish IV identification or eliminate weak-IV bias.
 #'
 #' @param d Binary absorbing adoption panel, [N x T].
 #' @param z Binary encouragement panel, [N x T].
@@ -222,12 +226,22 @@ encouragement_bounds <- function(y, d, z, x = NULL, delta = 1.0,
 #' @param burnin Number of burnin sweeps (default 200).
 #' @param draws Number of retained sweeps (default 300).
 #' @param seed Random seed.
-#' @return A list with `$table` and `$metadata`.
+#' @return A list with `$table`, `$metadata`, and `$draws`. Contrast draws retain
+#'   `(chain, retained_draw, horizon)` axes; relevance draws have the first two
+#'   axes. Raw traces permit inspection of convergence and Monte Carlo error.
 #' @export
 hazard_adoption_effects <- function(d, z, x = NULL, t = NULL,
                                     trees = 4L, chains = 2L,
                                     burnin = 200L, draws = 300L,
                                     seed = 42L) {
+  for (name in c("trees", "chains", "burnin", "draws", "seed")) {
+    value <- get(name)
+    minimum <- if (name %in% c("burnin", "seed")) 0 else 1
+    if (!is.numeric(value) || length(value) != 1L || !is.finite(value) ||
+        value < minimum || value != trunc(value) || value > .Machine$integer.max) {
+      stop(sprintf("%s must be an integer >= %d.", name, minimum), call. = FALSE)
+    }
+  }
   lb <- longbet_py()
   cfg <- lb$HazardConfig(trees = as.integer(trees))
   res <- lb$hazard_adoption_effects(
@@ -246,22 +260,36 @@ hazard_adoption_effects <- function(d, z, x = NULL, t = NULL,
   rownames(tbl) <- NULL
   list(
     table = tbl,
-    metadata = .encouragement_as_r(res$metadata)
+    metadata = .encouragement_plain(res$metadata),
+    draws = .encouragement_plain(res$draws)
   )
 }
 
 #' Structural treatment-clock duration deconvolution for longitudinal IV
 #'
-#' Estimates cumulative treatment exposure duration effects under adoption acceleration.
+#' Conventional panel 2SLS for a common response to cumulative exposure.
+#' Requires exclusion through treatment history, additive unit/time effects,
+#' and full rank of instrumented duration regressors. Confidence intervals use
+#' unit-cluster CR1 covariance and t(N-1) critical values; they require many
+#' independent units and strong instruments and are not weak-IV-robust.
 #'
 #' @param y Outcome panel, [N x T].
 #' @param d Binary absorbing adoption panel, [N x T].
-#' @param z Binary encouragement panel, [N x T].
-#' @param t Optional calendar periods, [T].
-#' @param model_type "linear", "stepwise", or "spline" (default "linear").
-#' @param max_duration Optional maximum duration to model.
+#' @param z Binary absorbing encouragement panel, [N x T], with a common onset
+#'   among encouraged units and at least one never-encouraged unit.
+#' @param t Optional strictly increasing, equally spaced periods, [T]. Duration
+#'   counts observed periods, independently of the numerical units of t.
+#' @param model_type "linear", "stepwise", or "quadratic" (default "linear").
+#'   The legacy name "spline" aliases a quadratic polynomial without knots.
+#' @param max_duration Optional maximum duration to evaluate. For "stepwise",
+#'   also imposes a constant response beyond this duration.
 #' @param alpha Significance level (default 0.05).
-#' @return A list with `$summary_table`, `$durations`, `$effects`, `$se`, `$ci_lower`, `$ci_upper`, `$first_stage_f`.
+#' @return A list with the duration-response estimates, unit-cluster covariance,
+#'   instrument and regressor ranks, and first-stage diagnostics.
+#'   `$first_stage_f` is a cluster Wald statistic divided by instrument rank for
+#'   a scalar endogenous regressor. It is unavailable (NaN) for multiple
+#'   regressors or singular cluster covariance; see `$first_stage_status` and
+#'   `$first_stage_diagnostics`. It does not use Stock--Yogo critical values.
 #' @export
 duration_deconvolution_effects <- function(y, d, z, t = NULL,
                                            model_type = "linear",
@@ -274,12 +302,15 @@ duration_deconvolution_effects <- function(y, d, z, t = NULL,
     z = reticulate::r_to_py(as.matrix(z)),
     t = if (is.null(t)) NULL else reticulate::r_to_py(as.numeric(t)),
     model_type = model_type,
-    max_duration = if (is.null(max_duration)) NULL else as.integer(max_duration),
+    max_duration = if (is.null(max_duration)) NULL else as.numeric(max_duration),
     alpha = alpha
   )
   tbl <- as.data.frame(.encouragement_as_r(res$summary_table))
   attr(tbl, "pandas.index") <- NULL
   rownames(tbl) <- NULL
+  first_stage <- as.data.frame(.encouragement_as_r(res$first_stage_diagnostics))
+  attr(first_stage, "pandas.index") <- NULL
+  rownames(first_stage) <- NULL
   list(
     summary_table = tbl,
     durations = as.numeric(res$durations),
@@ -287,45 +318,53 @@ duration_deconvolution_effects <- function(y, d, z, t = NULL,
     se = as.numeric(res$se),
     ci_lower = as.numeric(res$ci_lower),
     ci_upper = as.numeric(res$ci_upper),
-    first_stage_f = as.numeric(res$first_stage_f)
+    first_stage_f = as.numeric(res$first_stage_f),
+    first_stage_status = as.character(res$first_stage_status),
+    first_stage_diagnostics = first_stage,
+    coefficients = as.numeric(res$coefficients),
+    coefficient_covariance = as.matrix(.encouragement_as_r(res$coefficient_covariance)),
+    instrument_rank = as.integer(res$instrument_rank),
+    regressor_rank = as.integer(res$regressor_rank),
+    residual_df = as.integer(res$residual_df),
+    n_clusters = as.integer(res$n_clusters),
+    inference_method = as.character(res$inference_method)
   )
 }
 
 #' Direct joint Gaussian forest for encouragement panels
 #'
-#' Fits joint Gaussian forest with exact Gibbs sampling and correlated intercepts.
+#' Fits Gaussian reduced forms with smooth stump leaves and exact conditional
+#' Gibbs updates. Returns the same serializable R model as `longbet_encourage()`.
 #'
 #' @param y Outcome panel, [N x T].
 #' @param d Binary adoption panel, [N x T].
 #' @param z Binary encouragement panel, [N x T].
 #' @param x Baseline covariates, [N x P].
 #' @param t Optional calendar periods, [T].
-#' @param num_trees Number of trees (default 30).
-#' @param num_sweeps Number of sweeps (default 200).
+#' @param num_trees Number of trees in each of the baseline and effect ensembles.
+#' @param num_sweeps Number of retained draws per chain (default 200).
 #' @param num_burnin Number of burnin sweeps (default 50).
 #' @param correlated_intercepts Logical; learn cross-equation intercept covariance (default TRUE).
 #' @param seed Random seed.
-#' @return A fitted model object.
+#' @param num_chains Number of independent MCMC chains.
+#' @param n_skip Number of sweeps per retained draw after burn-in.
+#' @return A serializable `longbet_encourage` model. Use `predict()` to obtain
+#'   ITTs, posterior ratios, separate reference confidence sets and diagnostics.
+#' @details Sampling options are forwarded unchanged, with integer validation.
+#'   Both equations use Gaussian working likelihoods, with an LPM first stage.
+#'   The default short run does not guarantee convergence or interval coverage;
+#'   inspect `predict(fit)$diagnostics`. For other forest or prior options, use
+#'   `longbet_encourage(engine = "direct_smooth", direct_config = list(...))`.
 #' @export
 longbet_direct_smooth <- function(y, d, z, x, t = NULL,
-                                  num_trees = 30L, num_sweeps = 200L,
+                                  num_trees = 6L, num_sweeps = 200L,
                                   num_burnin = 50L, correlated_intercepts = TRUE,
-                                  seed = 42L) {
-  lb <- longbet_py()
-  cfg <- lb$DirectSmoothConfig(
-    num_trees = as.integer(num_trees),
-    num_sweeps = as.integer(num_sweeps),
-    num_burnin = as.integer(num_burnin),
-    correlated_intercepts = correlated_intercepts,
-    seed = as.integer(seed)
+                                  seed = 42L, num_chains = 4L, n_skip = 1L) {
+  longbet_encourage(
+    y, d, z, x, t = t, first_stage = "lpm", engine = "direct_smooth",
+    config = list(num_sweeps = num_sweeps, num_burnin = num_burnin,
+                  random_seed = seed, num_chains = num_chains, n_skip = n_skip),
+    direct_config = list(baseline_trees = num_trees, effect_trees = num_trees,
+                         correlated_intercepts = correlated_intercepts)
   )
-  model <- lb$LongBetDirectSmooth(cfg)
-  model$fit(
-    y = reticulate::r_to_py(as.matrix(y)),
-    d = reticulate::r_to_py(as.matrix(d)),
-    z = reticulate::r_to_py(as.matrix(z)),
-    x = reticulate::r_to_py(as.matrix(x)),
-    t = if (is.null(t)) NULL else reticulate::r_to_py(as.numeric(t))
-  )
-  model
 }

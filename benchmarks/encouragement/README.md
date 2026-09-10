@@ -1,5 +1,41 @@
 # Encouragement calibration and model comparison
 
+## Implementation and metric correction, 2026-09-10
+
+The [current comparison protocol](comparison-protocol.md) evaluates the repaired
+direct-smoothing estimator against both linear and spline ANCOVA/Fieller
+comparators on identical potential-outcome targets. It prespecifies strong,
+weak, null, abrupt-effect and dependent-error settings, retains failed fits, and
+requires coverage and diagnostics alongside estimation accuracy. Historical
+recovery examples and short chains do not establish superiority over existing IV.
+
+The legacy filename `sbc_calibration.py` now contains **fixed-parameter repeated-
+sampling coverage checks**, not simulation-based calibration. The earlier
+binary-bounds metric checked only whether a set was nonempty, and the earlier
+hazard metric expanded each interval by 0.25 before checking containment. Neither
+was coverage of the stated target by the reported interval. The corrected script
+uses a prespecified binary threshold and known complier potential-outcome contrast,
+reports binary bounds separately from continuous-effect intervals, checks actual
+endpoints, and leaves all unevaluated AR grid regions and tails unknown.
+
+`CoupledHazardIV` now declares its modular hazard/working-outcome distribution,
+uses proper hazard priors and exact conditional outcome draws, and withholds
+`causal_ci`. Its finite `beta_ci` describes an experimental working coefficient.
+The residual regression is not generally a valid control function, and a zero
+relevance draw leaves its two outcome columns collinear after time effects.
+Spike-and-slab regularization does not eliminate weak-instrument bias or supply
+identification. Optional working-interval containment checks are not validated
+causal inference.
+
+```bash
+PYTHONPATH=src python benchmarks/encouragement/sbc_calibration.py --replications 100 --output coverage_report.json
+```
+
+The older benchmark programs and reports below remain separate evidence; the
+corrections above do not reclassify their results as validation of a new model.
+
+## Earlier reference and model studies
+
 The reference estimator has been exercised in **21,000 complete-randomization
 replications** across 14 scenarios and three sample sizes, followed by 5,000-run
 extensions of two selected fixed populations. Model comparisons record actual

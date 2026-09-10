@@ -319,6 +319,38 @@ class LongBetEncourage:
         self.engine = config_kwargs.pop("engine", "longbet")
         self.direct_config = config_kwargs.pop("direct_config", None)
         self._direct_model = None
+        if self.engine not in ("longbet", "direct_smooth"):
+            raise ValueError("engine must be 'longbet' or 'direct_smooth'.")
+        if self.engine == "direct_smooth":
+            from longbet._direct_smooth import DirectSmoothConfig
+            if first_stage != "lpm" or outcome != "continuous":
+                raise ValueError("direct_smooth requires first_stage='lpm' and outcome='continuous'.")
+            supported = {"random_seed", "num_chains", "num_burnin", "num_sweeps", "n_skip"}
+            unsupported = config_kwargs.keys() - supported
+            if config is not None:
+                if not isinstance(config, LongBetConfig):
+                    raise TypeError("config must be a LongBetConfig or None.")
+                defaults = LongBetConfig()
+                unsupported |= {field.name for field in dataclasses.fields(config)
+                                if field.name not in supported and
+                                getattr(config, field.name) != getattr(defaults, field.name)}
+                # The wrapper's own proper-prior defaults are inert for this
+                # engine; direct_config owns both Gaussian variance priors.
+                for name, value in (("sigma_prior_a", 2.), ("sigma_prior_b", 1.)):
+                    if getattr(config, name) == value:
+                        unsupported.discard(name)
+            if unsupported:
+                raise ValueError("Unsupported direct_smooth LongBetConfig options: "
+                                 + ", ".join(sorted(unsupported))
+                                 + ". Set forest and prior options in direct_config.")
+            if isinstance(self.direct_config, dict):
+                self.direct_config = DirectSmoothConfig(**self.direct_config)
+            elif self.direct_config is None:
+                self.direct_config = DirectSmoothConfig()
+            elif not isinstance(self.direct_config, DirectSmoothConfig):
+                raise TypeError("direct_config must be a DirectSmoothConfig, dictionary, or None.")
+        elif self.direct_config is not None:
+            raise ValueError("direct_config requires engine='direct_smooth'.")
         if config is None:
             self.config = LongBetConfig(**{"sigma_prior_a": 2., "sigma_prior_b": 1.,
                                           **config_kwargs})
@@ -326,10 +358,10 @@ class LongBetEncourage:
             self.config = dataclasses.replace(config, **config_kwargs)
         else:
             raise TypeError("config must be a LongBetConfig or None.")
-        if self.config.sigma_prior_a <= 0 or self.config.sigma_prior_b <= 0:
+        if self.engine == "longbet" and (self.config.sigma_prior_a <= 0 or self.config.sigma_prior_b <= 0):
             raise ValueError("LongBetEncourage requires a proper innovation prior: "
                              "sigma_prior_a > 0 and sigma_prior_b > 0.")
-        if self.config.random_intercept and not all(
+        if self.engine == "longbet" and self.config.random_intercept and not all(
             np.isfinite(v) and v > 0 for v in (self.config.gamma_prior_a, self.config.gamma_prior_b)
         ):
             raise ValueError("random intercepts require proper positive gamma_prior_a and gamma_prior_b.")
@@ -348,9 +380,9 @@ class LongBetEncourage:
         if x_trt is not None:
             data["x_trt"] = _finite_matrix(x_trt, "x_trt", len(panel.z))
         model_t = data["t"].astype(np.float32)
-        if not np.all(np.diff(model_t) > 0) or not np.array_equal(
+        if self.engine == "longbet" and (not np.all(np.diff(model_t) > 0) or not np.array_equal(
             derive_exposure(data["z"], model_t), derive_exposure(data["z"], data["t"])
-        ):
+        )):
             raise ValueError("t loses encouragement-clock precision in the float32 model; "
                              "shift the calendar origin before fitting.")
         return data
@@ -360,10 +392,20 @@ class LongBetEncourage:
         """Fit Y and take-up jointly on randomized encouragement, preserving inputs."""
         if self.engine == "direct_smooth":
             from longbet._direct_smooth import LongBetDirectSmooth
+            if x_trt is not None:
+                raise ValueError("direct_smooth uses x for both forests; x_trt is unsupported.")
+            if key is not None:
+                raise ValueError("direct_smooth does not accept a JAX key; set random_seed instead.")
+            data = self._inputs(y, d, z, x, t, x_trt)
             self._direct_model = LongBetDirectSmooth(self.direct_config)
-            self._direct_model.fit(y, d, z, x, t=t)
-            self._data = self._direct_model._data
-            self.metadata = self._direct_model.metadata
+            self._direct_model.fit(**data, seed=self.config.random_seed,
+                                   chains=self.config.num_chains, burnin=self.config.num_burnin,
+                                   draws=self.config.num_sweeps, n_skip=self.config.n_skip)
+            self._data = data
+            for value in self._data.values():
+                value.flags.writeable = False
+            self.metadata = dict(self._direct_model.metadata,
+                                 wrapper_config=dataclasses.asdict(self.config))
             return self
         data = self._inputs(y, d, z, x, t, x_trt)
         first_period = bool(np.any(data["z"][:, 0])) and self.config.random_intercept
@@ -408,6 +450,9 @@ class LongBetEncourage:
         if self.engine == "direct_smooth":
             if self._direct_model is None:
                 raise RuntimeError("LongBetEncourage must be fitted before prediction.")
+            if summary_only is not True or block_size is not None or standardization != "conditional":
+                raise ValueError("direct_smooth supports only summary_only=True, block_size=None, "
+                                 "and standardization='conditional'.")
             return self._direct_model.predict(groups=groups, alpha=alpha)
         if self.model is None:
             raise RuntimeError("LongBetEncourage must be fitted before prediction.")
@@ -465,6 +510,7 @@ class LongBetEncourage:
             seed = int(rng.integers(0, 2**31))
             try:
                 fit = LongBetEncourage(self.config, first_stage=self.first_stage, outcome=self.outcome,
+                                       engine=self.engine, direct_config=self.direct_config,
                                        random_seed=seed)
                 fit.fit(self._data["y"][indices], self._data["d"][indices], self._data["z"][indices],
                         self._data["x"][indices], self._data["t"],
@@ -527,12 +573,14 @@ class LongBetEncourage:
         The archive contains the outcomes, assignment, adoption and baseline
         covariates needed to replay the identical target, as well as joint traces.
         """
-        if self.model is None:
+        if self.engine == "direct_smooth" and self._direct_model is None or (
+                self.engine == "longbet" and self.model is None):
             raise RuntimeError("LongBetEncourage must be fitted before saving.")
         arrays = dict(self._data)
         with tempfile.TemporaryDirectory() as tmp:
             nested = Path(tmp) / "model.npz"
-            self.model.save(nested)
+            fitted_model = self._direct_model if self.engine == "direct_smooth" else self.model
+            fitted_model.save(nested)
             arrays["model_archive"] = np.frombuffer(nested.read_bytes(), dtype=np.uint8)
         meta = dict(self.metadata, kind="LongBetEncourage", archive_version=ARCHIVE_VERSION,
                     input_hashes={name: _digest(value) for name, value in arrays.items()})
@@ -561,10 +609,34 @@ class LongBetEncourage:
                 raise ValueError("input or model digest mismatch")
             if arrays["model_archive"].dtype != np.uint8 or arrays["model_archive"].ndim != 1:
                 raise ValueError("invalid nested model bytes")
+            direct = meta.get("engine", "longbet") == "direct_smooth"
             with tempfile.TemporaryDirectory() as tmp:
                 nested = Path(tmp) / "model.npz"
                 nested.write_bytes(arrays.pop("model_archive").tobytes())
-                model = LongBetMulti.load(nested)
+                if direct:
+                    from longbet._direct_smooth import LongBetDirectSmooth
+                    model = LongBetDirectSmooth.load(nested)
+                else:
+                    model = LongBetMulti.load(nested)
+            if direct:
+                obj = cls(LongBetConfig(**meta["wrapper_config"]),
+                          engine="direct_smooth", direct_config=model.config,
+                          first_stage=meta["first_stage"], outcome=meta["outcome"])
+                obj._data = obj._inputs(**{**arrays, "x_trt": arrays.get("x_trt")})
+                if (any(not np.array_equal(value, model._data.get(name))
+                        for name, value in obj._data.items()) or
+                        any(meta.get(k) != v for k, v in model.metadata.items()) or
+                        model.metadata["sampler"] != dict(
+                            seed=obj.config.random_seed, chains=obj.config.num_chains,
+                            burnin=obj.config.num_burnin, draws=obj.config.num_sweeps,
+                            n_skip=obj.config.n_skip)):
+                    raise ValueError("direct_smooth model/design provenance mismatch")
+                for value in obj._data.values():
+                    value.flags.writeable = False
+                obj._direct_model = model
+                obj.metadata = {k: v for k, v in meta.items()
+                                if k not in ("kind", "archive_version", "input_hashes")}
+                return obj
             obj = cls(model.config, first_stage=meta["first_stage"], outcome=meta["outcome"])
             obj._data = obj._inputs(**{**arrays, "x_trt": arrays.get("x_trt")})
             panel = _validate(arrays["z"], arrays["d"], arrays["t"])

@@ -3,7 +3,8 @@
 \title{Joint reduced forms for randomized encouragement}
 \usage{
 longbet_encourage(y, d, z, x, t = NULL, x_trt = NULL,
-  first_stage, outcome = "continuous", config = list(), verbose = FALSE)
+  first_stage, outcome = "continuous", config = list(), verbose = FALSE,
+  engine = "longbet", direct_config = list())
 }
 \arguments{
 \item{y}{Complete numeric outcome matrix, N by T.}
@@ -17,12 +18,19 @@ longbet_encourage(y, d, z, x, t = NULL, x_trt = NULL,
 num_chains, num_sweeps, num_burnin, random_seed and variance priors. Unspecified
 innovation priors use proper IG(2,1); explicit improper priors are rejected.}
 \item{verbose}{Whether to print a fitting message.}
+\item{engine}{\code{"longbet"} or \code{"direct_smooth"}. The latter uses Gaussian
+smooth stump leaves and supports only continuous outcomes, an LPM first stage,
+and predictions for the all-unit target. Its \code{config} accepts only
+num_chains, num_burnin, num_sweeps, n_skip, and random_seed.}
+\item{direct_config}{Named list of DirectSmoothConfig forest and prior options
+for \code{engine = "direct_smooth"}. Set \code{correlated_intercepts = TRUE}
+to estimate a covariance between the two equations' unit intercepts.}
 }
 \description{Fits Y and actual adoption jointly on assigned encouragement using
 the Python engine, for one encouragement wave and a permanent control arm.}
 \details{Prediction averages both ITTs over all original study units using equal
 weights. Probit uses probability differences. Neither first-stage model is a
-calibrated default. SUR couples innovations when a continuous equation is
+calibrated default. For \code{engine = "longbet"}, SUR couples innovations when a continuous equation is
 present; unit-intercept priors are independent across equations. With binary Y
 and a probit first stage, both innovation-loading rows are fixed at zero, so
 \code{sur = TRUE} does not couple innovations. These equations are independent

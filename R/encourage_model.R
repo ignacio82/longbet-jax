@@ -28,15 +28,17 @@
   reticulate::import("longbet", convert = FALSE)$LongBetEncourage$load(path)
 }
 
-.encouragement_config_args <- function(config, lb) {
+.encouragement_config_args <- function(config, lb, direct = FALSE) {
   if (!is.list(config) || (length(config) &&
       (is.null(names(config)) || anyNA(names(config)) ||
        any(!nzchar(names(config))) || anyDuplicated(names(config))))) {
     stop("config must be a list of uniquely named sampler options.", call. = FALSE)
   }
-  defaults <- .encouragement_plain(reticulate::import("dataclasses")$asdict(lb$LongBetConfig()))
+  prototype <- if (direct) lb$DirectSmoothConfig() else lb$LongBetConfig()
+  defaults <- .encouragement_plain(reticulate::import("dataclasses")$asdict(prototype))
   if (any(!names(config) %in% names(defaults)) || "outcome" %in% names(config)) {
-    stop("config names must be LongBetConfig options; set outcome separately.", call. = FALSE)
+    stop(if (direct) "direct_config names must be DirectSmoothConfig options." else
+         "config names must be LongBetConfig options; set outcome separately.", call. = FALSE)
   }
   # R's ordinary numeric literals are doubles. Respect Python integer fields
   # without silently rounding noninteger values or maintaining a second config.
@@ -74,6 +76,13 @@
 #'   follow `longbet()`. Set `num_chains`, `num_burnin`, `num_sweeps`, and
 #'   `random_seed` here; convergence still requires checking.
 #' @param verbose Whether to print a fitting message.
+#' @param engine `"longbet"` or `"direct_smooth"`. The latter uses Gaussian
+#'   smooth stump leaves and supports only continuous outcomes and an LPM first
+#'   stage. Its `config` accepts only `num_chains`, `num_burnin`, `num_sweeps`,
+#'   `n_skip`, and `random_seed`. Prediction supports the all-unit target only.
+#' @param direct_config Named list of `DirectSmoothConfig` forest and prior
+#'   options for `engine = "direct_smooth"`. Set `correlated_intercepts = TRUE`
+#'   to estimate a covariance between the two equations' unit intercepts.
 #' @return A `longbet_encourage` object containing a versioned raw archive,
 #'   metadata and configuration, with no live Python handles. The archive
 #'   includes original outcomes, adoption, assignment and covariates so prediction
@@ -81,7 +90,8 @@
 #' @details Both ITTs average over all original study units with equal weights.
 #'   Binary contrasts are probability differences. The Wald ratio is not
 #'   automatically CACE; exclusion, monotonicity, relevance and appropriate
-#'   adoption-history assumptions are additional requirements. SUR couples
+#'   adoption-history assumptions are additional requirements. For
+#'   `engine = "longbet"`, SUR couples
 #'   innovations when a continuous equation is present; unit-intercept priors
 #'   are independent across equations. With binary Y and a probit first stage,
 #'   both innovation-loading rows are fixed at zero, so `sur = TRUE` does not
@@ -91,25 +101,33 @@
 #' @export
 longbet_encourage <- function(y, d, z, x, t = NULL, x_trt = NULL,
                              first_stage, outcome = "continuous",
-                             config = list(), verbose = FALSE) {
+                             config = list(), verbose = FALSE,
+                             engine = "longbet", direct_config = list()) {
   if (missing(first_stage)) stop("Choose first_stage = 'lpm' or 'probit' explicitly.", call. = FALSE)
   first_stage <- match.arg(first_stage, c("lpm", "probit"))
   outcome <- match.arg(outcome, c("continuous", "binary"))
+  engine <- match.arg(engine, c("longbet", "direct_smooth"))
   lb <- longbet_py()
   options <- .encouragement_config_args(config, lb)
-  engine <- do.call(lb$LongBetEncourage,
-                   c(list(first_stage = first_stage, outcome = outcome), options))
+  direct_options <- .encouragement_config_args(direct_config, lb, direct = TRUE)
+  if (engine != "direct_smooth" && length(direct_options)) {
+    stop("direct_config requires engine = 'direct_smooth'.", call. = FALSE)
+  }
+  backend <- do.call(lb$LongBetEncourage,
+                    c(list(first_stage = first_stage, outcome = outcome, engine = engine,
+                           direct_config = if (engine == "direct_smooth")
+                             do.call(lb$DirectSmoothConfig, direct_options) else NULL), options))
   if (isTRUE(verbose)) message("Fitting joint encouragement reduced forms.")
-  engine$fit(y = as.matrix(y), d = as.matrix(d), z = as.matrix(z), x = as.matrix(x),
+  backend$fit(y = as.matrix(y), d = as.matrix(d), z = as.matrix(z), x = as.matrix(x),
              t = if (is.null(t)) NULL else as.numeric(t),
              x_trt = if (is.null(x_trt)) NULL else as.matrix(x_trt))
   path <- tempfile(fileext = ".npz")
   on.exit(unlink(path), add = TRUE)
-  engine$save(path)
+  backend$save(path)
   structure(list(
     raw_archive = readBin(path, what = "raw", n = file.info(path)$size),
-    metadata = .encouragement_plain(engine$metadata),
-    config = .encouragement_plain(reticulate::import("dataclasses")$asdict(engine$config)),
+    metadata = .encouragement_plain(backend$metadata),
+    config = .encouragement_plain(reticulate::import("dataclasses")$asdict(backend$config)),
     call = match.call()
   ), class = "longbet_encourage")
 }
