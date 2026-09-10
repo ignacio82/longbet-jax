@@ -173,7 +173,8 @@ def run_one(task: dict) -> str:
             elif method.endswith("ancova"):
                 rows = reference_rows(*adjusted_contrasts(data, spline=method == "spline_ancova"))
             else:
-                config = DirectSmoothConfig(baseline_trees=4, effect_trees=4)
+                config = DirectSmoothConfig(baseline_trees=4, effect_trees=4,
+                    correlated_intercepts=task.get("correlated_intercepts", False))
                 fit = LongBetDirectSmooth(config).fit(
                     data["y"], data["d"], data["z"], data["x"], data["t"],
                     chains=4, burnin=task["burnin"], draws=task["draws"], seed=task["seed"]+10000000)
@@ -208,6 +209,8 @@ def main():
     parser.add_argument("--burnin", type=int, default=500)
     parser.add_argument("--draws", type=int, default=1000)
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--correlated-intercepts", action="store_true",
+                        help="Separate covariance-model sensitivity analysis; not the primary model.")
     args = parser.parse_args()
     if args.n < 100 or args.n % 2 or min(args.replications, args.draws, args.workers) < 1:
         parser.error("Require even n >= 100 and positive replication/draw/worker counts.")
@@ -230,7 +233,8 @@ def main():
             if not path.exists():
                 tasks.append(dict(scenario=scenario, replicate=replicate,
                                   seed=args.seed+100000*SCENARIOS.index(scenario)+replicate,
-                                  n=args.n, burnin=args.burnin, draws=args.draws, output=str(args.output)))
+                                  n=args.n, burnin=args.burnin, draws=args.draws, output=str(args.output),
+                                  correlated_intercepts=args.correlated_intercepts))
     with ProcessPoolExecutor(max_workers=args.workers, mp_context=multiprocessing.get_context("spawn")) as pool:
         futures=[pool.submit(run_one,t) for t in tasks]
         for future in as_completed(futures):
