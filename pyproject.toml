@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "GPU-accelerated LongBet (time-varying treatment effects in panel data) in JAX"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 authors = [
     { name = "Ignacio Martinez" }
 ]

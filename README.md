@@ -645,3 +645,7 @@ option without recording it fails the build.
 ## License
 
 Apache License 2.0.
+
+## Disclaimer
+
+This is not an officially supported Google product.
