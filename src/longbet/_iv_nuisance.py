@@ -45,6 +45,11 @@ class LongBetIVNuisanceConfig:
     interaction_partitions: bool = True
     max_interaction_rules: int = 64
     seed: int = 0
+    kernel: str = "matern32"
+    linear_ancova_backbone: bool = True
+    adoption_model: str = "hazard"
+    ridge_penalty: float = 1.0
+    engine: str = "numpy"
 
     def __post_init__(self) -> None:
         for name, lower in (("baseline_trees", 1), ("effect_trees", 1),
@@ -64,6 +69,18 @@ class LongBetIVNuisanceConfig:
             raise ValueError("nugget must be finite and positive.")
         if not isinstance(self.interaction_partitions, bool):
             raise ValueError("interaction_partitions must be boolean.")
+        if self.kernel not in ("rbf", "matern32", "matern12"):
+            raise ValueError(f"Unknown kernel: {self.kernel}")
+        if not isinstance(self.linear_ancova_backbone, bool):
+            raise ValueError("linear_ancova_backbone must be boolean.")
+        if self.adoption_model not in ("hazard", "clipped_gaussian"):
+            raise ValueError(f"Unknown adoption_model: {self.adoption_model}")
+        if not np.isfinite(self.ridge_penalty) or self.ridge_penalty <= 0:
+            raise ValueError("ridge_penalty must be finite and positive.")
+        if self.engine not in ("numpy", "jax"):
+            raise ValueError(f"Unknown engine: {self.engine}")
+
+
 
 
 def inner_validation_split(assignment: Any, seed: int,
@@ -287,8 +304,19 @@ class LongBetIVNuisance:
 
     def fit(self, x_train: Any, assignment_train: Any, responses_train: Any,
             times_post: Any) -> LongBetIVNuisance:
+        if self.config.engine == "jax":
+            from longbet._jax_nuisance import JAXLongBetIVNuisance
+            self._delegate = JAXLongBetIVNuisance(self.config).fit(
+                x_train, assignment_train, responses_train, times_post
+            )
+            self.fitted_ = True
+            self.n_features_in_ = self._delegate.n_features_in_
+            self.metadata_ = self._delegate.metadata_
+            return self
+
         x, z, responses, times = _training_arrays(x_train, assignment_train, responses_train, times_post)
         self.fitted_ = False
+
         scores: list[dict[str, float]] = []
         validation_indices = np.empty(0, dtype=int)
         selected = float(self.config.length_scales[0])
@@ -316,7 +344,7 @@ class LongBetIVNuisance:
             "inner_training_count": len(x) - len(validation_indices),
             "inner_validation_count": len(validation_indices),
             "new_unit_intercept": "integrated_prior_mean_zero",
-            "adoption_prediction": "clipped_gaussian_working_mean",
+            "adoption_prediction": self.config.adoption_model,
             "posterior_interval_inference": False,
             "n_training_accounts": len(x),
             "n_horizons": len(times),
@@ -324,6 +352,8 @@ class LongBetIVNuisance:
             "prediction_chain_rms_discrepancy": self._fitted["chain_rms_discrepancy"].tolist(),
             "prediction_chain_rms_scale": "training_factual_predictions_per_response_training_sd",
             "random_intercept_sampling": "integrated_during_tree_updates_refreshed_before_variances",
+            "linear_ancova_backbone": self.config.linear_ancova_backbone,
+            "kernel": self.config.kernel,
         }
         self.fitted_ = True
         return self
@@ -337,18 +367,61 @@ class LongBetIVNuisance:
             joint_effect_leaves=False,
             nugget=self.config.nugget,
         )
-        center = raw.mean(axis=(0, 1))
-        scale = raw.std(axis=(0, 1))
-        scale = np.where(scale > 1e-10, scale, 1.0)
-        standardized = (raw - center) / scale
-        space = _prediction_tree_space(x, self.config)
+        n = len(x)
+        h = len(times)
         p = float(z.mean())
+
+        x_mean = x.mean(axis=0)
+        x_std = np.where(x.std(axis=0) > 1e-8, x.std(axis=0), 1.0)
+        xs = (x - x_mean) / x_std
+        w = np.column_stack([np.ones(n), xs])
+
+        linear_coefs_y = {}
+        raw_for_trees = raw.copy()
+
+        if self.config.linear_ancova_backbone:
+            lin_pred_y = np.zeros((n, h))
+            penalty = np.full(w.shape[1], self.config.ridge_penalty)
+            penalty[0] = 0.0
+            for arm in (0, 1):
+                mask = (z == arm)
+                wa = w[mask]
+                gram = wa.T @ wa + np.diag(penalty)
+                coef_y = np.linalg.solve(gram, wa.T @ raw[mask, :, 0])
+                linear_coefs_y[arm] = coef_y
+                lin_pred_y[mask] = wa @ coef_y
+            raw_for_trees[..., 0] = raw[..., 0] - lin_pred_y
+
+        hazard_coefs = {}
+        if self.config.adoption_model == "hazard":
+            for arm in (0, 1):
+                mask = (z == arm)
+                arm_coefs = []
+                for t_idx in range(h):
+                    at_risk = mask & ((raw[:, t_idx-1, 1] == 0) if t_idx > 0 else np.ones(n, dtype=bool))
+                    if at_risk.sum() >= 4 and raw[at_risk, t_idx, 1].var() > 1e-8:
+                        wa_risk = w[at_risk]
+                        gram = wa_risk.T @ wa_risk + self.config.ridge_penalty * np.eye(w.shape[1])
+                        beta_h = np.linalg.solve(gram, wa_risk.T @ raw[at_risk, t_idx, 1])
+                        arm_coefs.append((beta_h, "linear"))
+                    else:
+                        rate = float(np.clip(raw[at_risk, t_idx, 1].mean() if at_risk.sum() > 0 else 0.5, 1e-4, 1.0 - 1e-4))
+                        arm_coefs.append((rate, "const"))
+                hazard_coefs[arm] = arm_coefs
+            raw_for_trees[..., 1] = 0.0
+
+        center = raw_for_trees.mean(axis=(0, 1))
+        scale = raw_for_trees.std(axis=(0, 1))
+        scale = np.where(scale > 1e-10, scale, 1.0)
+        standardized = (raw_for_trees - center) / scale
+        space = _prediction_tree_space(x, self.config)
         normalized_times = (times - times[0]) / (np.median(np.diff(times)) if len(times) > 1 else 1.0)
         def covariance(trees: int) -> np.ndarray:
             if length_scale == 0:
                 return np.eye(len(times)) / trees
             return time_covariance(normalized_times, sd=1 / np.sqrt(trees),
-                                   length_scale=length_scale, nugget=config.nugget)
+                                   length_scale=length_scale, nugget=config.nugget,
+                                   kernel=self.config.kernel)
         baseline_covariance = covariance(config.baseline_trees)
         effect_covariance = covariance(config.effect_trees)
         baseline = ForestDesign.build(space, np.ones(len(x)), baseline_covariance)
@@ -367,8 +440,6 @@ class LongBetIVNuisance:
                         np.add.at(chain_effect[chain, ..., equation], state.effect_rules, state.effect_leaves)
         chain_baseline /= self.config.draws
         chain_effect /= self.config.draws
-        # Prediction disagreement is an algorithmic stability indicator, not
-        # an MCMC convergence certificate or an inferential standard error.
         chain_fits = np.stack([_evaluate_forest(space.mask, b) +
                                _evaluate_forest(space.mask, e) * (z - p)[:, None, None]
                                for b, e in zip(chain_baseline, chain_effect)])
@@ -379,6 +450,11 @@ class LongBetIVNuisance:
             "effect_leaves": chain_effect.mean(axis=0),
             "assignment_fraction": p, "center": center, "scale": scale,
             "chain_rms_discrepancy": chain_rms,
+            "x_mean": x_mean, "x_std": x_std,
+            "linear_ancova_backbone": self.config.linear_ancova_backbone,
+            "linear_coefs_y": linear_coefs_y,
+            "adoption_model": self.config.adoption_model,
+            "hazard_coefs": hazard_coefs,
         }
 
     @staticmethod
@@ -387,18 +463,50 @@ class LongBetIVNuisance:
         baseline = _evaluate_forest(masks, fitted["baseline_leaves"])
         effect = _evaluate_forest(masks, fitted["effect_leaves"])
         centered_assignment = np.arange(2) - fitted["assignment_fraction"]
-        prediction = ((baseline[:, :, None, :] + effect[:, :, None, :] * centered_assignment[None, None, :, None])
-                      * fitted["scale"] + fitted["center"])
-        prediction[..., 1] = np.clip(prediction[..., 1], 0.0, 1.0)
+        tree_prediction = ((baseline[:, :, None, :] + effect[:, :, None, :] * centered_assignment[None, None, :, None])
+                           * fitted["scale"] + fitted["center"])
+
+        prediction = tree_prediction.copy()
+        n = len(x)
+        h = tree_prediction.shape[1]
+
+        if fitted.get("linear_ancova_backbone", False) and "linear_coefs_y" in fitted:
+            xs = (x - fitted["x_mean"]) / fitted["x_std"]
+            w = np.column_stack([np.ones(n), xs])
+            for arm in (0, 1):
+                if arm in fitted["linear_coefs_y"]:
+                    lin_y = w @ fitted["linear_coefs_y"][arm]
+                    prediction[:, :, arm, 0] = lin_y + tree_prediction[:, :, arm, 0]
+
+        if fitted.get("adoption_model") == "hazard" and "hazard_coefs" in fitted:
+            xs = (x - fitted["x_mean"]) / fitted["x_std"]
+            w = np.column_stack([np.ones(n), xs])
+            for arm in (0, 1):
+                if arm in fitted["hazard_coefs"]:
+                    hazards = np.zeros((n, h))
+                    for t_idx, (coef, kind) in enumerate(fitted["hazard_coefs"][arm]):
+                        if kind == "linear":
+                            hazards[:, t_idx] = np.clip(w @ coef, 1e-4, 1.0 - 1e-4)
+                        else:
+                            hazards[:, t_idx] = coef
+                    surv = np.cumprod(1.0 - hazards, axis=1)
+                    prediction[:, :, arm, 1] = 1.0 - surv
+        else:
+            prediction[..., 1] = np.clip(prediction[..., 1], 0.0, 1.0)
+
         return prediction
 
     def predict(self, x_test: Any) -> np.ndarray:
         if not self.fitted_:
             raise RuntimeError("Fit the nuisance learner before prediction.")
+        if getattr(self, "_delegate", None) is not None:
+            return self._delegate.predict(x_test)
         x = np.asarray(x_test, dtype=float)
         if x.ndim != 2 or x.shape[1] != self.n_features_in_ or not np.isfinite(x).all():
             raise ValueError("x_test must be finite and match the training feature count.")
         return self._predict_fitted(x, self._fitted)
+
+
 
 
 __all__ = ["LongBetIVNuisance", "LongBetIVNuisanceConfig", "inner_validation_split", "nuisance_validation_score"]

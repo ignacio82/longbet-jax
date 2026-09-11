@@ -28,6 +28,11 @@ from longbet._direct_smooth import (
 )
 from longbet._iv import longbet_iv
 from longbet._iv_nuisance import LongBetIVNuisance, LongBetIVNuisanceConfig
+from longbet._jax_nuisance import JAXLongBetIVNuisance
+from longbet._duration_iv import (
+    HeterogeneousDurationIVResult,
+    heterogeneous_duration_iv,
+)
 from longbet._orthogonal_iv import CrossfitEncouragementResult, crossfit_encouragement
 from longbet._randomization_ar import (
     RandomizationARResult,
@@ -105,7 +110,9 @@ __all__ = [
     "HazardAdoptionForest",
     "HazardAdoptionResult",
     "HazardConfig",
+    "HeterogeneousDurationIVResult",
     "IdentificationBoundsResult",
+    "JAXLongBetIVNuisance",
     "LongBet",
     "LongBetConfig",
     "LongBetDirectSmooth",
@@ -135,6 +142,7 @@ __all__ = [
     "get_att",
     "get_catt",
     "hazard_adoption_effects",
+    "heterogeneous_duration_iv",
     "identification_bounds",
     "joint_prob",
     "load_multi_npz",

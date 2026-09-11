@@ -121,11 +121,30 @@ def make_tree_space(x: np.ndarray, config: DirectSmoothConfig) -> TreeSpace:
     )
 
 
-def time_covariance(times: np.ndarray, *, sd: float, length_scale: float, nugget: float) -> np.ndarray:
+def time_covariance(
+    times: np.ndarray,
+    *,
+    sd: float,
+    length_scale: float,
+    nugget: float,
+    kernel: str = "rbf",
+) -> np.ndarray:
     times = np.asarray(times, dtype=float)
+    if length_scale <= 0:
+        raise ValueError("length_scale must be positive.")
     delta = (times[:, None] - times[None, :]) / length_scale
-    correlation = (np.exp(-0.5 * delta**2) + nugget * np.eye(len(times))) / (1 + nugget)
+    r = np.abs(delta)
+    if kernel == "rbf":
+        corr = np.exp(-0.5 * delta**2)
+    elif kernel == "matern32":
+        corr = (1.0 + np.sqrt(3.0) * r) * np.exp(-np.sqrt(3.0) * r)
+    elif kernel == "matern12":
+        corr = np.exp(-r)
+    else:
+        raise ValueError(f"Unknown kernel: {kernel}")
+    correlation = (corr + nugget * np.eye(len(times))) / (1 + nugget)
     return sd**2 * correlation
+
 
 
 @dataclass
