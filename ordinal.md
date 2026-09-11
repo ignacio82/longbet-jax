@@ -133,7 +133,7 @@ Validate before compilation:
 Compute in host float64 on observed cells only:
 
 $$p_j=\frac{\#\{Y_{it}\leq j:\mathrm{observed}\}}{n_{\mathrm{obs}}},
-\qquad q_j=\Phi^{-1}(\operatorname{clip}(p_j,10^{-4},1-10^{-4})).$$
+\qquad q_j=\Phi^{-1}(\mathrm{clip}(p_j,10^{-4},1-10^{-4})).$$
 
 Set `offset_=-q_0`, since `P(Y=0 | eta=offset_)=Phi(-offset_)`.
 If 80% of observations are category zero, the offset is approximately
@@ -216,7 +216,7 @@ supplied residual reconstructs the conditional mean (section 6).
 
 Construct `full = [-inf, 0, *cutpoints, inf]`. For observed category `k`, draw
 
-$$\ell_{it}^{\mathrm{new}}\sim\operatorname{TN}
+$$\ell_{it}^{\mathrm{new}}\sim\mathrm{TN}
 (\mathrm{mean}_{it},\mathrm{sd}_{it}^2;\theta_k,\theta_{k+1}).$$
 
 Standardized bounds are `(full[k]-mean)/sd` and `(full[k+1]-mean)/sd`;
@@ -243,7 +243,7 @@ Use `max(empty)=-inf` and `min(empty)=+inf`. The exact conditional under the
 specified joint prior is
 
 $$\theta_j\mid\ell,Y,\theta_{-j}\sim
-\operatorname{TN}(0,s_\theta^2;L_j,U_j).$$
+\mathrm{TN}(0,s_\theta^2;L_j,U_j).$$
 
 Conditional on latents, the likelihood only restricts admissible thresholds;
 the remaining density is the normal prior. A uniform draw targets a different
@@ -501,7 +501,7 @@ precision is `Q_mm`, using only supported observed likelihood rows. Thus the
 latent conditional is
 
 $$\ell_m\mid\ell_{-m},Y_m,\ldots\sim
-\operatorname{TN}(\ell_m-\widetilde R_m,Q_{mm}^{-1};
+\mathrm{TN}(\ell_m-\widetilde R_m,Q_{mm}^{-1};
 \theta_{Y_m},\theta_{Y_m+1}).$$
 
 A downstream continuous observation can make this variance smaller than one.
