@@ -16,6 +16,8 @@ continuous outcomes (including log scales), and \code{Phi(mu0 + tau) - Phi(mu0)}
 for binary outcomes. The latter is a probability difference in [-1, 1], so
 \code{0.01} means one percentage point. Saved R prediction arrays can be used
 without a live Python prediction handle.
+Ordinal selections require an explicit category or score and raise an error;
+use \code{\link{att_probabilities}} or \code{\link{att_expected_score}} for ordinal ATTs.
 }
 \seealso{\code{\link{longbet_multi}}, \code{\link{joint_prob}}}
 \examples{

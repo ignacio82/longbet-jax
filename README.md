@@ -35,8 +35,12 @@ call the same engine, so results agree exactly rather than approximately.
   baseline upward.
 - **Unbalanced panels.** `NA` outcomes are marginalized through every
   conditional, not imputed.
-- **Binary outcomes.** Albert–Chib probit augmentation, with the probit
-  intercept carried as the forest offset.
+- **Binary and ordered categorical outcomes.** Latent probit augmentation for
+  binary ($K=2$) and ordered ($K \ge 2$) responses. Free thresholds are updated
+  with a partially collapsed Metropolis–Hastings move in log-gap space that
+  marginalizes latent variables, bypassing Gibbs conditioning bottlenecks.
+  Exposes draw-wise category probabilities, probability ATTs ($\Delta P(Y=k)$),
+  and custom-weighted expected score ATTs.
 - **Bounded memory.** `summary_only` reduces the panel in blocks of cells, so
   the $N \times T \times \mathrm{draws}$ array is never built. Quantiles stay
   exact — the blocking is over cells, not draws.
@@ -178,13 +182,13 @@ asserts that equality exactly.
 
 ## Multiple Outcomes (Full-Precision SUR)
 
-LongBet supports joint estimation of multiple continuous and binary outcomes on a shared panel using full-precision triangular Seemingly Unrelated Regressions (`sampler_semantics="full_precision_sur_v1"`):
+LongBet supports joint estimation of continuous, binary, and ordinal outcomes on a shared panel using full-precision triangular Seemingly Unrelated Regressions (`sampler_semantics="full_precision_sur_v1"`):
 
 $$
 Y^{(m)}_{it} = \alpha_m \mu_m(X_i, t, X^{\mathrm{tv}}_{it}) + b^{(m)}_{Z_{it}} \beta^{(m)}_{S_{it}} \nu_m(X_i, S_{it}, t, X^{\mathrm{trt,tv}}_{it}) + \gamma^{(m)}_i + \sum_{j < m} \Gamma_{mj} \tilde R^{(j)}_{it} + \epsilon^{(m)}_{it}
 $$
 
-where $\tilde R^{(j)}_{it}$ is the response minus its own mean surface (including its unit intercept, but excluding loading offsets); binary responses in this equation mean their augmented latent values. Binary outcomes are placed first, with zero incoming loadings and unit marginal latent variance. Continuous observations inform their latent draws and mean updates through the full likelihood precision.
+where $\tilde R^{(j)}_{it}$ is the response minus its own mean surface (including its unit intercept, but excluding loading offsets); discrete responses in this equation mean their augmented latent values. Binary and ordinal outcomes are placed first in a stable partition, with zero incoming loadings and unit marginal latent variance. Continuous observations inform their latent draws and mean updates through the full likelihood precision. Different ordinal children can declare different category counts.
 
 **Gibbs transition ordering and numerical stability.** The Gibbs sweep operates in the order $\mu \to \alpha \to \nu \to \beta \to b \to \gamma \to \sigma^2$. Updating $\nu$ before $\beta$ provides the GP conditional with full treatment contrast precision from the first sweep. Furthermore, because LongBet changes observation weights between sweeps, the sampler refreshes leaf-precision sums before each dynamically weighted forest update, and forest fits are accumulated directly from cached leaf assignments rather than differencing residuals after division by small treatment weights $w$, preventing float32 cancellation artifacts in leaf residual tracking.
 
@@ -343,8 +347,122 @@ new public defaults or a validated chapter configuration.
 | Adaptive coding `b0`, `b1` | fixed at 1 by default | **sampled by default** (see below) |
 | `att_stability()` verdict | `reliable` column | withheld; numbers only (see below) |
 | Multiple outcomes | One-way recursive SUR | Full-precision triangular SUR, with opt-in shared/private treatment partitions, downstream binary feedback, multi-chain diagnostics and draw-paired residual correlation |
+| Ordered categorical outcomes | Not supported | **Fully supported** (`outcome="ordinal"`), with proper ordered-normal threshold prior, partially collapsed marginalized threshold MH proposals, category probabilities, probability ATTs, and score ATTs |
 
 ---
+
+## Ordered categorical outcomes
+
+Set `outcome="ordinal"` and declare `num_categories=K`. Use numeric integer
+labels `0,...,K-1`; only `NaN` (`NA` in R) marks missingness. Empty categories,
+including the first or last, are allowed. Labels are never recoded and K is
+never inferred. Ordinal responses use latent probit units regardless of
+`standardize`.
+
+The latent observation variance is fixed at one and thresholds are
+`[-inf, 0, theta_2, ..., theta_(K-1), inf]`. Positive free thresholds have an
+ordered-normal prior with `cutpoint_prior_scale=5.0`. This is a substantive
+prior in latent units; sparse categories can be sensitive to it. Free
+thresholds are updated via a partially collapsed Metropolis–Hastings proposal
+in unconstrained log-gap space $u_j = \log(\theta_j - \theta_{j-1})$ that
+marginalizes latent variables, bypassing the severe Albert–Chib Gibbs
+conditioning bottleneck that occurs when large panels sandwich cutpoints. Latents
+are then refreshed conditionally before Gaussian parameter and forest steps.
+Sequential Gibbs is also supported as an independent primitive. Numerical
+failures in unrepresentable intervals raise errors. For `K=2`, the fit
+dispatches the existing binary sampler and yields identical seeded
+forest/parameter draws.
+
+```python
+from longbet import LongBet, LongBetConfig
+
+model = LongBet(LongBetConfig(outcome="ordinal", num_categories=4))
+model.fit(y=y, x=x, z=z, t=t)
+pred = model.predict(x=x, z=z, t=t, summary_only=True)
+category_summary = pred.predict_probabilities()
+category_att = pred.att_probabilities()
+top_category_att = pred.att_expected_score(weights=[0, 0, 0, 1])
+```
+
+`predict_probabilities(arm="factual"|"control"|"effect", summary=True)` returns
+posterior mean, SD and exact interval bounds, each `(N,T,K)`. With
+`summary=False` it returns `(N,T,K,D)` draws, provided `summary_only=False`
+was used at prediction time. The corresponding attributes are `prob_y`,
+`prob_mu0`, `prob_tau`, and their `*_summary` fields. Category probabilities
+integrate observation noise; they are not sampled labels. Effects subtract
+the control probability from the treated probability within each draw,
+using that draw's thresholds and both forest evaluations.
+
+`att_probabilities()` returns `att (S,K)`, `intervals (2,S,K)`,
+`att_full (S,K,D)`, `exposure`, and `categories`. The draws are also retained
+as `pred.att_prob_full`, including in summary mode. ATT uses all treated
+prediction cells at each positive exposure, including cells whose training
+outcome was missing. Empty exposures return NaN. Probabilities sum to one;
+category effects sum to zero.
+
+`att_expected_score(weights=None)` forms a weighted category ATT in each draw
+and returns `att (S)`, `intervals (2,S)`, `att_full (S,D)`, `exposure`, and
+`weights`. Default weights `0,...,K-1` report expected rank and are a scoring
+convention, not a claim of equal spacing between categories. Weights need not
+increase; indicator weights select a category or an exceedance effect.
+
+Existing `tauhats`, `muhats0`, `yhats`, `att()`, and `stability()` remain on the
+latent scale. Diagnose category/score ATT and free cutpoints separately. For
+example, with C chains and D total draws, category k can be diagnosed using
+`att_stability(pred.att_prob_full[:, k, :].reshape(S, C, D//C).transpose(1, 2, 0))`.
+Free threshold draws are `pred.cutpoints_samples (D,K-2)` in chain-major order.
+The [ordinal validation report](benchmarks/ordinal_validation_report.md)
+records the specified repeated-panel experiment, confirming cutpoint convergence
+($\hat R < 1.02$, $\text{ESS} > 340$) and benchmark coverage across independent
+seeded panels.
+
+Summary prediction transforms all draws within each cell block before
+reducing. Its working byte budget accounts for float64 CDF calculations and
+all categories; exact quantiles do not require a full panel-by-draw buffer.
+The optional forest-evaluation cache still retains full forest buffers and
+is disabled by default. Unit intercepts match fitted rows by position when
+unit counts agree; otherwise they are zero. These are conditional predictions,
+not marginal predictions for a new random unit. Use `random_intercept=False`
+for held-out new-unit calibration unless this positional convention is suitable.
+
+For mixed outcomes, provide category counts in user order:
+
+```python
+joint.fit(y={"continuous": y_cont, "rating": y_ord, "binary": y_bin},
+          x=x, z=z, t=t,
+          outcome=["continuous", "ordinal", "binary"],
+          num_categories=[None, 4, None])
+rating_pred = joint.predict(x=x, z=z, t=t, summary_only=True)["rating"]
+rating_att = rating_pred.att_probabilities()
+```
+
+An integer category count broadcasts to ordinal children; a mapping must name
+every outcome and use `None` for nonordinal children. Ordinal fitting supports
+SUR and shared treatment trees. Incoming discrete loading rows remain zero,
+so this model has no freely correlated discrete residuals. Prediction uses
+unit marginal variance, even when fitting-time conditional variance is smaller.
+The scalar `effect_draws` and `joint_prob` interfaces reject ordinal selections
+and direct callers to the category/score methods. Scalar and multi NPZ archives
+store all thresholds and category metadata; ordinal multi archives use format 3.
+Archives store prediction state and do not support resuming MCMC.
+
+The same interface is available in R:
+
+```r
+fit <- longbet(y, x, z, t=t, outcome="ordinal", num_categories=4)
+pred <- predict(fit, x, z, t=t, summary_only=TRUE)
+category_summary <- predict_probabilities(pred)
+category_att <- att_probabilities(pred)
+top_category_att <- att_expected_score(pred, weights=c(0, 0, 0, 1))
+# For mixed fits: num_categories=list(NULL, 4L, NULL) in outcome order.
+```
+
+R preserves the category axis, including K=2 and singleton panels/draws.
+Fits and prediction summaries remain usable after `saveRDS/readRDS` through
+the Python archive/array bridge. Only ordered probit is exposed. Section 10
+of `ordinal.md` describes the separate cloglog evaluation gates; replacing
+the likelihood would also require new weighted-tree, GP, coding and joint
+transitions, rather than only a different prediction CDF.
 
 ## Diagnostics, and a verdict deliberately not issued
 
@@ -410,16 +528,18 @@ and `test_model.py` asserts they do.
 ## What has been verified
 
 The test suite checks conditional distributions, residual bookkeeping,
-chain execution, prediction, persistence, and multi-outcome coupling across 330
-automated tests.
+chain execution, prediction, persistence, multi-outcome coupling, and ordinal
+threshold transitions across more than 500 automated tests.
 
-**Complete test suite** — all 330 unit, integration, and regression tests pass cleanly:
+**Complete test suite** — all 506 unit, integration, and regression tests pass cleanly:
+- 161 dedicated ordinal tests covering interval sampling stability, sequential Gibbs and marginalized proposals, multi-chain execution, prediction algebra, memory bounds, and mixed-outcome SUR.
 - 64 multi-outcome tests covering linear algebra, inputs, missingness, scalar equivalence, statistical properties, and I/O.
 - 22 proper-prior and boundary-defect validation tests.
 - 17 full triangular SUR coupling and covariance-recovery tests.
 - 52 interface, contract, prediction options, and diagnostic tests.
 - 10 ATT and rank-normalized MCMC stability diagnostic tests.
 - 2 joint Geweke distribution tests verifying that the successive-conditional sampler recovers analytic priors.
+- 385 R `testthat` assertions checking exact Python/R numerical parity and fresh-session rehydration.
 
 **SUR error-covariance recovery** — triangular loading coefficients $\Gamma$ and structural innovation variances $\sigma^2$ mix reliably with $\hat R \le 1.01$ and $\text{ESS} > 2,000$ on 4 parallel chains.
 

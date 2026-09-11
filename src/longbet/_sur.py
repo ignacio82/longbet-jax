@@ -3,11 +3,11 @@
 With raw residuals r=y*-f, B=I-Gamma, and independent innovations e=B r with
 variances v, the likelihood precision is B.T diag(1/v) B. Every observed
 innovation containing r_m contributes to outcome m's conditional, not only
-its own equation. Binary rows of Gamma are zero (marginal probit scale one).
+its own equation. Binary and ordinal rows of Gamma are zero (marginal probit scale one).
 
 Observation masks must be closed under predecessors: if a continuous equation
 is observed, all its preceding outcomes are observed. Unobserved downstream
-innovations then integrate to one. Binary-only masks need not be nested,
+innovations then integrate to one. Discrete-only masks need not be nested,
 because those innovation rows have no predecessors. Input validation enforces
 this policy; the formulas below must NOT be used for arbitrary missingness.
 """

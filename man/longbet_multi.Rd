@@ -18,7 +18,8 @@ longbet_multi(y, x, z, t = NULL, x_trt = NULL, x_tv = NULL, x_trt_tv = NULL,
   b_scaling = TRUE, ridge_move = TRUE, ridge_proposal_sigma = 0.2,
   standardize = TRUE, random_seed = 0, device = c("auto", "cpu", "gpu"),
   sur = TRUE, sur_prior_var = 1, num_shared_trees = 0,
-  shared_variance_fraction = 0.5, verbose = FALSE, ...)
+  shared_variance_fraction = 0.5, verbose = FALSE, num_categories = NULL,
+  cutpoint_prior_scale = 5.0, ...)
 }
 \arguments{
 \item{y}{Outcome panels: a list of \code{[N x T]} matrices, or a 3-D numeric array
@@ -59,7 +60,13 @@ standardized responses, \code{2} and \code{1} specify a proper IG(2,1) prior
 with mean variance one. With \code{standardize=FALSE}, choose these in outcome units.}
 \item{sigma_b}{Prior standard deviation of adaptive coding weights.}
 \item{sigma_alpha}{Prior standard deviation of prognostic scale.}
-\item{outcome}{Outcome type(s): \code{"continuous"}, \code{"binary"}, or a vector of length \code{M}.}
+\item{outcome}{Outcome type(s): \code{"continuous"}, \code{"binary"}, \code{"ordinal"}, or a vector of length \code{M}.}
+\item{num_categories}{Integer broadcast to ordinal outcomes or a list in user
+order (optionally fully named), with \code{NULL} for nonordinal entries.
+Every ordinal outcome requires K>=2 and explicit numeric labels \code{0,...,K-1}.
+Empty categories are allowed; counts are never inferred.}
+\item{cutpoint_prior_scale}{Shared finite positive ordered-normal cutpoint
+prior scale in latent probit units, default 5. Inactive for nonordinal outcomes or K=2.}
 \item{outcome_names}{Optional character vector of length \code{M} naming the outcomes.}
 \item{a_scaling}{Whether to sample the prognostic scale \code{alpha}.}
 \item{b_scaling}{Whether to sample adaptive coding weights \code{b0}, \code{b1}.}
@@ -86,10 +93,11 @@ inert when sharing is disabled.}
 Fits outcome-specific prognostic forests on a shared panel,
 using the full precision of a triangular SUR (seemingly unrelated regressions)
 likelihood (\code{full_precision_sur_v1}). Downstream observations inform earlier
-means and binary latent responses. Binary equations come first, with zero
-incoming loadings and unit marginal latent variance; complete or appropriately
-nested observation masks are required when coupling is active.
-Coupled fits remain experimental: aligned draws do not establish calibrated
+means and discrete latent responses. Binary and ordinal equations come first
+in a stable partition, with zero incoming loadings and unit marginal latent
+variance. Discrete outcomes have no free residual correlation parameter.
+An observed continuous response requires observed predecessors when coupled.
+Aligned draws do not establish calibrated
 joint inference. Treatment trees are outcome-specific by default. With
 \code{num_shared_trees > 0}, that many partitions have vector-valued leaves,
 with remaining private trees (\code{shared_private_sur_v1}). Shared leaf values

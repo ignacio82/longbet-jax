@@ -22,7 +22,9 @@ bounds without materializing full \code{[N x T x draws]} arrays.}
 \item{cache_forest_evaluations}{Whether to cache prognostic forest evaluations.}
 \item{...}{Reserved; unsupported arguments raise an error.}
 }
-\value{An object of class \code{longbet_multi.pred}.}
+\value{An object of class \code{longbet_multi.pred}. Ordinal children expose
+category probability draws, summaries, and category/score ATT methods as
+documented in \code{\link{predict.longbet}}.}
 \description{
 Predict treatment effects and outcomes for all fitted outcomes from a
 \code{longbet_multi} model.
@@ -34,4 +36,3 @@ pred <- predict(fit, x = x, z = z, t = 1:Tn)
 pred_rev <- pred["rev"]
 }
 }
-

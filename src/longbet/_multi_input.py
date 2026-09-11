@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from numbers import Integral
 from typing import Any
 
 import numpy as np
 import scipy.stats as stats
 
 from longbet._config import LongBetConfig
+from longbet._ordinal import prepare_ordinal
 
 
 @dataclass(frozen=True)
@@ -20,6 +22,7 @@ class NormalizedMultiInput:
     y_user: list[np.ndarray]
     outcome_names: tuple[str, ...]
     user_outcomes: tuple[str, ...]
+    user_num_categories: tuple[int | None, ...]
 
     # Permutations between user order and internal sampling order
     order: tuple[int, ...]
@@ -28,6 +31,7 @@ class NormalizedMultiInput:
     # Internal order quantities (binary first, then continuous)
     internal_names: tuple[str, ...]
     internal_outcomes: tuple[str, ...]
+    internal_num_categories: tuple[int | None, ...]
     obs_masks: list[np.ndarray]
     y_prepared: list[np.ndarray]
     meany: tuple[float, ...]
@@ -45,6 +49,7 @@ def normalize_multi_inputs(
     outcome: str | Sequence[str] | Mapping[str, str] | None,
     outcome_names: Sequence[str] | None,
     config: LongBetConfig,
+    num_categories: int | Sequence[int | None] | Mapping[str, int | None] | None = None,
 ) -> NormalizedMultiInput:
     """Validate and normalize multi-outcome responses.
 
@@ -80,9 +85,9 @@ def normalize_multi_inputs(
                 )
         if len(container_names) != len(set(container_names)):
             raise ValueError("Duplicate outcome names in mapping.")
-        y_list = [np.asarray(y[k], dtype=np.float64) for k in container_names]
+        y_list = [np.asarray(y[k]) for k in container_names]
     elif isinstance(y, (list, tuple)):
-        y_list = [np.asarray(elem, dtype=np.float64) for elem in y]
+        y_list = [np.asarray(elem) for elem in y]
     elif isinstance(y, np.ndarray):
         if y.ndim != 3:
             raise ValueError(
@@ -92,7 +97,7 @@ def normalize_multi_inputs(
             )
         # Extract slices with drop=False semantics
         M_dim = y.shape[2]
-        y_list = [np.asarray(y[:, :, m], dtype=np.float64) for m in range(M_dim)]
+        y_list = [np.asarray(y[:, :, m]) for m in range(M_dim)]
     else:
         raise TypeError(
             f"Unsupported type for y: {type(y)}. Expected mapping, sequence of "
@@ -161,9 +166,9 @@ def normalize_multi_inputs(
     if outcome is None:
         user_outcomes = [config.outcome] * M
     elif isinstance(outcome, str):
-        if outcome not in ("continuous", "binary"):
+        if outcome not in ("continuous", "binary", "ordinal"):
             raise ValueError(
-                f"outcome must be 'continuous' or 'binary', got {outcome!r}"
+                f"outcome must be 'continuous', 'binary', or 'ordinal', got {outcome!r}"
             )
         user_outcomes = [outcome] * M
     elif isinstance(outcome, Mapping):
@@ -182,9 +187,9 @@ def normalize_multi_inputs(
             )
         user_outcomes = [outcome[name] for name in final_names]
         for t, name in zip(user_outcomes, final_names):
-            if t not in ("continuous", "binary"):
+            if t not in ("continuous", "binary", "ordinal"):
                 raise ValueError(
-                    f"outcome for {name!r} must be 'continuous' or 'binary', got {t!r}"
+                    f"outcome for {name!r} must be 'continuous', 'binary', or 'ordinal', got {t!r}"
                 )
     elif isinstance(outcome, (Sequence, np.ndarray)):
         if len(outcome) != M:
@@ -194,19 +199,20 @@ def normalize_multi_inputs(
             )
         user_outcomes = [str(t) for t in outcome]
         for t, name in zip(user_outcomes, final_names):
-            if t not in ("continuous", "binary"):
+            if t not in ("continuous", "binary", "ordinal"):
                 raise ValueError(
-                    f"outcome for {name!r} must be 'continuous' or 'binary', got {t!r}"
+                    f"outcome for {name!r} must be 'continuous', 'binary', or 'ordinal', got {t!r}"
                 )
     else:
         raise TypeError(f"Unsupported type for outcome: {type(outcome)}")
 
     user_outcomes_tuple = tuple(user_outcomes)
+    counts = resolve_category_counts(num_categories, final_names, user_outcomes, config.num_categories)
 
     # ------------------------------------------------------------------
-    # 4. Binary-first stable partition
+    # 4. Stable partition of all discrete outcomes, then continuous outcomes.
     # ------------------------------------------------------------------
-    binary_indices = [i for i, t in enumerate(user_outcomes) if t == "binary"]
+    binary_indices = [i for i, t in enumerate(user_outcomes) if t != "continuous"]
     continuous_indices = [i for i, t in enumerate(user_outcomes) if t == "continuous"]
     order = tuple(binary_indices + continuous_indices)
     inverse_order = tuple(int(idx) for idx in np.argsort(order))
@@ -228,6 +234,9 @@ def normalize_multi_inputs(
         name = final_names[u_idx]
         otype = user_outcomes[u_idx]
         arr = y_list[u_idx]
+        prepared = prepare_ordinal(arr, counts[u_idx]) if otype == "ordinal" else None
+        arr = np.asarray(arr, dtype=np.float64)
+        y_list[u_idx] = arr
 
         if np.isneginf(arr).any() or np.isposinf(arr).any():
             raise ValueError(f"Outcome {name!r} contains infinite values.")
@@ -237,6 +246,7 @@ def normalize_multi_inputs(
             raise ValueError(f"Outcome {name!r} has no observed values.")
 
         obs_vals = arr[mask]
+        clean = np.where(mask, arr, 0.)
 
         if otype == "continuous":
             if config.standardize:
@@ -247,12 +257,16 @@ def normalize_multi_inputs(
                     )
                 meany = float(np.mean(obs_vals))
                 offset_val = 0.0
-                y_std = np.where(mask, (arr - meany) / sdy, 0.0).astype(np.float32)
+                y_std = np.where(mask, (clean - meany) / sdy, 0.0).astype(np.float32)
             else:
                 meany = 0.0
                 sdy = 1.0
                 offset_val = 0.0
                 y_std = np.where(mask, arr, 0.0).astype(np.float32)
+        elif otype == "ordinal":
+            meany, sdy = 0., 1.
+            offset_val = prepared.offset
+            y_std = prepared.labels
         else:  # binary
             # Observed labels must be 0 or 1
             unique_vals = np.unique(obs_vals)
@@ -294,10 +308,12 @@ def normalize_multi_inputs(
         y_user=y_list,
         outcome_names=outcome_names_tuple,
         user_outcomes=user_outcomes_tuple,
+        user_num_categories=counts,
         order=order,
         inverse_order=inverse_order,
         internal_names=internal_names,
         internal_outcomes=internal_outcomes,
+        internal_num_categories=tuple(counts[i] for i in order),
         obs_masks=obs_masks,
         y_prepared=y_prepared,
         meany=tuple(meany_list),
@@ -307,3 +323,32 @@ def normalize_multi_inputs(
         N=N,
         T=T,
     )
+
+
+def resolve_category_counts(counts, names, outcomes, default=None):
+    """Resolve declared category counts in caller order without inferring K."""
+    if counts is not None and "ordinal" not in outcomes:
+        raise ValueError("num_categories requires at least one ordinal outcome")
+    if counts is None:
+        resolved = [default if t == "ordinal" else None for t in outcomes]
+    elif isinstance(counts, Integral) and not isinstance(counts, (bool, np.bool_)):
+        resolved = [counts if t == "ordinal" else None for t in outcomes]
+    elif isinstance(counts, Mapping):
+        if set(counts) != set(names):
+            raise ValueError("num_categories mapping keys must exactly match all outcome names")
+        resolved = [counts[name] for name in names]
+    elif isinstance(counts, (Sequence, np.ndarray)) and not isinstance(counts, str):
+        if len(counts) != len(outcomes):
+            raise ValueError("num_categories sequence must match the number of outcomes")
+        resolved = list(counts)
+    else:
+        raise ValueError("num_categories must be an integer, sequence, or mapping")
+    for i, (value, typ) in enumerate(zip(resolved, outcomes)):
+        if typ == "ordinal":
+            if (isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral)
+                    or value < 2):
+                raise ValueError(f"num_categories for {names[i]!r} must be an integer >=2")
+            resolved[i] = int(value)
+        elif value is not None:
+            raise ValueError(f"num_categories for nonordinal outcome {names[i]!r} must be None")
+    return tuple(resolved)

@@ -40,6 +40,7 @@ from bartz.mcmcstep._axes import CHAIN_AXIS
 
 from longbet._config import LongBetConfig
 from longbet._gp import build_kernel_matrix, kernel_cholesky
+from longbet._ordinal import full_cutpoints, prepare_ordinal, sample_ordinal_latents
 from longbet._shared_forest import enable_x64
 
 #: Which leaves carry a chain axis is **not** hardcoded here.  ``bartz``
@@ -100,6 +101,7 @@ class LongBetState(State):
     b1: Float32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     sigma2: Float32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     sigma_gamma2: Float32[Array, '*chains'] = field(chains=CHAIN_AXIS)
+    cutpoints: Float32[Array, '*chains K_free'] = field(chains=CHAIN_AXIS)
 
     # --- cached forest fits, in their own units ------------------------------
     mu_fit: Float32[Array, '*chains n'] = field(chains=CHAIN_AXIS, data=-1)
@@ -124,6 +126,8 @@ class LongBetState(State):
     sigma_b: float = field(static=True, default=0.7071067811865476)
     sigma_alpha: float = field(static=True, default=1.0)
     outcome_type_str: str = field(static=True, default="continuous")
+    num_categories: int = field(static=True, default=0)
+    cutpoint_prior_scale: float = field(static=True, default=5.0)
 
     @property
     def has_chain_axis(self) -> bool:
@@ -256,7 +260,7 @@ def _overdisperse_chains(
             )
         return jnp.exp(jax.random.normal(k, (num_chains,), jnp.float32)).astype(jnp.float32)
 
-    if state.outcome_type_str == "binary":
+    if state.outcome_type_str in ("binary", "ordinal"):
         sigma2 = jnp.ones((num_chains,), dtype=jnp.float32)
     else:
         sigma2 = _inv_gamma_or_spread(k_sig, state.sigma_prior_a, state.sigma_prior_b)
@@ -288,11 +292,29 @@ def _overdisperse_chains(
         b0 = state.b0
         b1 = state.b1
 
-    return eqx.tree_at(
+    state = eqx.tree_at(
         lambda s: (s.beta, s.gamma, s.sigma2, s.sigma_gamma2, s.b0, s.b1, s.resid),
         state,
         (beta, gamma, sigma2, sigma_gamma2, b0, b1, resid),
     )
+    if state.num_categories > 2:
+        # Ordinal-only streams; preserve the five legacy initialization keys.
+        gap_key = jax.random.fold_in(key, 8101)
+        latent_keys = jax.random.split(jax.random.fold_in(key, 8102), num_chains)
+        gaps = jnp.diff(jnp.concatenate((jnp.zeros((num_chains, 1)),
+                                         state.cutpoints), axis=1), axis=1)
+        gaps *= jnp.exp(.25 * jax.random.normal(gap_key, gaps.shape, jnp.float32))
+        cutpoints = jnp.cumsum(gaps, axis=1)
+        mean = (state.alpha[:, None] * state.mu_fit
+                + jnp.where(state.z_vec == 1, b1[:, None], b0[:, None])
+                * beta[:, state.exposure_idx] * state.nu_fit
+                + gamma[:, state.unit_idx])
+        z = jax.vmap(lambda k, m, cp, old: sample_ordinal_latents(
+            k, state.y, m, 1., cp, state.obs_mask, old))(
+                latent_keys, mean, cutpoints, state.z)
+        state = eqx.tree_at(lambda s: (s.cutpoints, s.z, s.resid), state,
+                            (cutpoints, z, jnp.where(state.obs_mask, z - mean, 0.)))
+    return state
 
 
 @enable_x64(False)
@@ -387,7 +409,27 @@ def init_longbet(
     mask_nu_init = obs_mask & (jnp.abs(w_init) > 1e-6)
     error_scale_nu = jnp.reciprocal(jnp.where(mask_nu_init, jnp.abs(w_init), 1.0))
 
-    is_binary = config.outcome == "binary"
+    is_binary = config.outcome == "binary" or (
+        config.outcome == "ordinal" and config.num_categories == 2)
+    is_ordered = config.outcome == "ordinal" and config.num_categories > 2
+    cutpoints = jnp.empty((0,), jnp.float32)
+    working_y = y
+    if config.outcome == "ordinal":
+        prepared = prepare_ordinal(np.where(np.asarray(obs_mask), np.asarray(y), np.nan),
+                                   config.num_categories)
+        y = jnp.asarray(prepared.labels)
+        cutpoints = jnp.asarray(prepared.cutpoints)
+        if is_ordered:
+            full = full_cutpoints(cutpoints)
+            labels = y.astype(jnp.int32)
+            lo, hi = full[labels], full[labels + 1]
+            # A finite interior working response, never category labels passed
+            # through bartz's binary branch. No hidden initialization RNG.
+            lo_f = jnp.where(jnp.isfinite(lo), lo, hi - 2.)
+            hi_f = jnp.where(jnp.isfinite(hi), hi, lo + 2.)
+            working_y = jnp.where(obs_mask, lo_f / 2 + hi_f / 2, 0.)
+        else:
+            working_y = y
 
     def _err_cov() -> Wishart:
         # A fresh object per call: bartz's init donates and deletes its buffers.
@@ -396,7 +438,7 @@ def init_longbet(
     # X and y are copied because bartz's init donates and deletes its buffers.
     state_mu = init(
         X=jnp.copy(X_unified),
-        y=jnp.copy(y),
+        y=jnp.copy(working_y),
         outcome_type="binary" if is_binary else "continuous",
         offset=offset,
         max_split=jnp.copy(max_split_mu),
@@ -414,7 +456,7 @@ def init_longbet(
 
     state_nu = init(
         X=jnp.copy(X_unified),
-        y=jnp.copy(y),
+        y=jnp.copy(working_y),
         outcome_type="continuous",
         offset=0.0,
         max_split=jnp.copy(max_split_nu),
@@ -476,8 +518,8 @@ def init_longbet(
     state = LongBetState(
         _chain_anchor=state_mu._chain_anchor,
         X=state_mu.X,
-        y=state_mu.y,
-        z=state_mu.z,
+        y=y if is_ordered else state_mu.y,
+        z=working_y if is_ordered else state_mu.z,
         binary_indices=state_mu.binary_indices,
         resid=resid_init,
         resid_unit=state_mu.resid_unit,
@@ -515,6 +557,7 @@ def init_longbet(
         b1=jnp.array(b1_init, dtype=jnp.float32),
         sigma2=jnp.array(1.0, dtype=jnp.float32),
         sigma_gamma2=jnp.array(init_sigma_gamma2, dtype=jnp.float32),
+        cutpoints=cutpoints,
         # Include the forest offset: prediction includes it, and the alpha
         # conditional must scale the same prognostic mean as the likelihood.
         mu_fit=jnp.full(n, offset, dtype=jnp.float32),
@@ -535,7 +578,18 @@ def init_longbet(
         sigma_b=config.sigma_b,
         sigma_alpha=config.sigma_alpha,
         outcome_type_str=config.outcome,
+        num_categories=(config.num_categories if config.outcome == "ordinal"
+                        else 2 if is_binary else 0),
+        cutpoint_prior_scale=config.cutpoint_prior_scale,
     )
+
+    if is_ordered:
+        latent = working_y
+        if chain_key is not None and (num_chains is None or num_chains <= 1):
+            latent = sample_ordinal_latents(jax.random.fold_in(chain_key, 8103),
+                y, state.mu_fit, 1., cutpoints, obs_mask, working_y)
+        state = eqx.tree_at(lambda s: (s.z, s.resid), state,
+                            (latent, jnp.where(obs_mask, latent - state.mu_fit, 0.)))
 
     if num_chains is not None and num_chains > 1:
         state = broadcast_to_chains(state, int(num_chains), key=chain_key)

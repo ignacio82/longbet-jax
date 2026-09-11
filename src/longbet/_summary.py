@@ -19,6 +19,18 @@ import numpy as np
 _TARGET_BLOCK_ELEMENTS = 8_000_000
 
 
+def choose_ordinal_block_size(n_draws: int, n_cells: int, num_categories: int) -> int:
+    """Bound ordinal working storage to ~32 MB, including float64 CDF buffers.
+
+    Budget sixteen float64 category buffers plus sixteen float32 latent/forest
+    buffers per cell/draw. This includes paired arm probabilities, CDF bounds,
+    log-CDFs, quantile work, and their transient copies. Required retained
+    summaries and exposure ATT draws are outside this working budget.
+    """
+    per_cell = max(1, n_draws) * (16 * 8 * num_categories + 16 * 4)
+    return min(max(1, n_cells), max(1, _TARGET_BLOCK_ELEMENTS * 4 // per_cell))
+
+
 class PosteriorSummary(NamedTuple):
     """Posterior point estimates and credible interval bounds."""
 
@@ -65,11 +77,11 @@ class BlockAccumulator:
     Peak memory is ``block_size * draws`` instead of ``n_cells * draws``.
     """
 
-    def __init__(self, n_cells: int, alpha: float = 0.05) -> None:
-        self.mean = np.empty(n_cells, dtype=np.float32)
-        self.std = np.empty(n_cells, dtype=np.float32)
-        self.lower = np.empty(n_cells, dtype=np.float32)
-        self.upper = np.empty(n_cells, dtype=np.float32)
+    def __init__(self, n_cells: int, alpha: float = 0.05, *, dtype=np.float32) -> None:
+        self.mean = np.empty(n_cells, dtype=dtype)
+        self.std = np.empty(n_cells, dtype=dtype)
+        self.lower = np.empty(n_cells, dtype=dtype)
+        self.upper = np.empty(n_cells, dtype=dtype)
         self._q_low = 100.0 * (alpha / 2.0)
         self._q_high = 100.0 * (1.0 - alpha / 2.0)
 

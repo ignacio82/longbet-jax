@@ -32,7 +32,12 @@ the fitted values.}
 \item{cache_forest_evaluations}{Whether to cache prognostic forest evaluations.}
 \item{...}{Reserved; unsupported arguments are an error.}
 }
-\value{An object of class \code{longbet.pred}.}
+\value{An object of class \code{longbet.pred}. Ordinal predictions also contain
+\code{num_categories}, \code{categories}, \code{cutpoints_samples}
+\code{[draws x (K-2)]}, \code{prob_y}, \code{prob_mu0}, \code{prob_tau}
+\code{[N x T x K x draws]} (NULL in summary mode), their \code{*_summary}
+lists \code{[N x T x K]}, and \code{att_prob_full} \code{[S x K x draws]}.
+Existing prediction fields remain on the latent scale.}
 \description{
 Every input the model was fitted with must be supplied again. Omitting one is an
 error, not a silently narrower design: the fitted trees index columns by

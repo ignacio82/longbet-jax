@@ -12,3 +12,4 @@
 ^tests/conftest\.py$
 ^tests/test_.*\.py$
 ^\.venv$
+^ordinal\.md$

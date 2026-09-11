@@ -75,7 +75,12 @@
 #'   `(0, 0)` is the improper reference prior.
 #' @param sigma_b Prior standard deviation of the adaptive coding weights.
 #' @param sigma_alpha Prior standard deviation of the prognostic scale.
-#' @param outcome `"continuous"` or `"binary"` (probit).
+#' @param outcome `"continuous"`, `"binary"` (probit), or `"ordinal"` (ordered probit).
+#' @param num_categories Declared integer category count, at least 2, for ordinal
+#'   outcomes; `NULL` otherwise. Labels must be numeric `0,...,K-1`; empty
+#'   categories are allowed. Ordinal outcomes are never standardized.
+#' @param cutpoint_prior_scale Finite positive ordered-normal cutpoint prior
+#'   scale in latent probit units, default 5. Inactive for nonordinal or K=2.
 #' @param a_scaling Whether to sample the prognostic scale `alpha`.
 #' @param b_scaling Whether to sample the adaptive coding weights `b0`, `b1`.
 #'   On by default: this is an exactly conjugate move along the global scale of
@@ -114,14 +119,15 @@ longbet <- function(y, x, z, t = NULL,
                     gamma_prior_a = 1.0, gamma_prior_b = 0.1,
                     sigma_prior_a = 0.0, sigma_prior_b = 0.0,
                     sigma_b = 0.7071067811865476, sigma_alpha = 1.0,
-                    outcome = c("continuous", "binary"),
+                    outcome = c("continuous", "binary", "ordinal"),
                     a_scaling = FALSE, b_scaling = TRUE,
                     ridge_move = TRUE, ridge_proposal_sigma = 0.2,
                     standardize = TRUE, random_seed = 0,
                     device = c("auto", "cpu", "gpu"),
                     sur = TRUE, sur_prior_var = 1.0,
                     num_shared_trees = 0, shared_variance_fraction = 0.5,
-                    verbose = FALSE, ...) {
+                    verbose = FALSE, num_categories = NULL,
+                    cutpoint_prior_scale = 5.0, ...) {
 
   .reject_unsupported(...)
   .check_shared_treatment_options(num_shared_trees, shared_variance_fraction)
@@ -131,9 +137,12 @@ longbet <- function(y, x, z, t = NULL,
   outcome <- match.arg(outcome)
   device <- match.arg(device)
 
-  lb <- longbet_py()
+  .check_cutpoint_prior(cutpoint_prior_scale)
+  if (outcome == "ordinal") num_categories <- .check_category_count(num_categories)
+  else if (!is.null(num_categories)) stop("num_categories must be NULL for nonordinal outcomes.", call. = FALSE)
 
   y <- as.matrix(y)
+  if (outcome == "ordinal") .check_ordinal_labels(y, num_categories)
   x <- as.matrix(x)
   z <- as.matrix(z)
   if (is.null(t)) t <- seq_len(ncol(y))
@@ -147,6 +156,7 @@ longbet <- function(y, x, z, t = NULL,
     stop(sprintf("x has %d rows but y has %d.", nrow(x), nrow(y)), call. = FALSE)
   }
 
+  lb <- longbet_py()
   config <- lb$LongBetConfig(
     num_sweeps = as.integer(num_sweeps),
     num_burnin = as.integer(num_burnin),
@@ -180,6 +190,8 @@ longbet <- function(y, x, z, t = NULL,
     sigma_b = as.numeric(sigma_b),
     sigma_alpha = as.numeric(sigma_alpha),
     outcome = outcome,
+    num_categories = num_categories,
+    cutpoint_prior_scale = as.numeric(cutpoint_prior_scale),
     sample_alpha = as.logical(a_scaling),
     adaptive_coding = as.logical(b_scaling),
     ridge_move = as.logical(ridge_move),
@@ -204,7 +216,7 @@ longbet <- function(y, x, z, t = NULL,
     y = .as_np_matrix(y, "y"),
     x = .as_np_matrix(x, "x"),
     z = .as_np_matrix(z, "z"),
-    t = reticulate::r_to_py(t),
+    t = .as_np_vector(t),
     x_trt = .as_np_matrix(x_trt, "x_trt"),
     x_tv = .as_np_array3(x_tv, "x_tv"),
     x_trt_tv = .as_np_array3(x_trt_tv, "x_trt_tv"),
@@ -266,6 +278,8 @@ longbet <- function(y, x, z, t = NULL,
     meany = as.numeric(py_model$meany),
     random_intercept = as.logical(random_intercept),
     outcome = outcome,
+    num_categories = num_categories,
+    cutpoint_prior_scale = as.numeric(cutpoint_prior_scale),
     model_params = list(
       burnin = as.integer(num_burnin),
       num_sweeps = as.integer(num_sweeps),
@@ -292,6 +306,7 @@ print.longbet <- function(x, ...) {
   cat(sprintf("  Trees:   %d prognostic / %d treatment\n",
               p$num_trees_pr, p$num_trees_trt))
   cat(sprintf("  Outcome: %s\n", x$outcome))
+  if (identical(x$outcome, "ordinal")) cat(sprintf("  Categories: %d; effects and residual SD are on the latent probit scale.\n", x$num_categories))
   cat(sprintf("  Unit random intercept: %s\n",
               if (isTRUE(x$random_intercept)) "yes" else "no"))
   cat(sprintf("  Residual SD (posterior mean): %.4f\n",

@@ -163,6 +163,8 @@ class LongBetMulti:
         self.fits: OutcomeList | None = None
         self.outcome_names: tuple[str, ...] | None = None
         self.outcome: tuple[str, ...] | None = None
+        self.num_categories: tuple[int | None, ...] | None = None
+        self.internal_num_categories: tuple[int | None, ...] | None = None
         self.order: tuple[int, ...] | None = None
         self.inverse_order: tuple[int, ...] | None = None
         self.sur_active: bool = False
@@ -247,6 +249,7 @@ class LongBetMulti:
         *,
         outcome: str | Sequence[str] | Mapping[str, str] | None = None,
         outcome_names: Sequence[str] | None = None,
+        num_categories: int | Sequence[int | None] | Mapping[str, int | None] | None = None,
     ) -> LongBetMulti:
         """Fit the coupled multi-outcome LongBet model."""
         cfg = self.config
@@ -257,6 +260,7 @@ class LongBetMulti:
             outcome=outcome,
             outcome_names=outcome_names,
             config=cfg,
+            num_categories=num_categories,
         )
 
         N, T, M = norm_in.N, norm_in.T, norm_in.M
@@ -264,6 +268,8 @@ class LongBetMulti:
         self.T_ = T
         self.outcome_names = norm_in.outcome_names
         self.outcome = norm_in.user_outcomes
+        self.num_categories = norm_in.user_num_categories
+        self.internal_num_categories = norm_in.internal_num_categories
         self.order = norm_in.order
         self.inverse_order = norm_in.inverse_order
         self.sur_active = cfg.sur_active
@@ -405,13 +411,16 @@ class LongBetMulti:
                     "No predictions or joint probabilities from this fit are valid.")
         self.state = result.final_state
         self.trace = result.main_trace
+        if "ordinal" in self.outcome:
+            jax.block_until_ready(self.trace)
 
         # 5. Build child LongBet fits in USER order
         child_fits = []
         for u in range(M):
             internal_idx = self.inverse_order[u]
             child_otype = self.outcome[u]
-            child_cfg = dataclasses.replace(cfg, outcome=child_otype, num_shared_trees=0)
+            child_cfg = dataclasses.replace(cfg, outcome=child_otype, num_shared_trees=0,
+                                             num_categories=self.num_categories[u])
 
             child_model = LongBet(child_cfg)
             child_model.design_ = shared_design
@@ -577,6 +586,9 @@ def effect_draws_from_arrays(
     Binary effects are probability differences in [-1, 1], so 0.01 is one
     percentage point. No live prediction handle is required.
     """
+    if outcome == "ordinal":
+        raise ValueError("Ordinal effects require selecting a category or score with "
+                         "att_probabilities() or att_expected_score().")
     if summary_only or tauhats is None:
         raise ValueError(
             "effect_draws requires full posterior draws. Re-run predict with "

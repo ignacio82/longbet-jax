@@ -153,6 +153,7 @@ def init_multi_longbet(
     for m in range(M):
         otype = norm_input.internal_outcomes[m]
         child_cfg = dataclasses.replace(config, outcome=otype,
+            num_categories=norm_input.internal_num_categories[m],
             num_shared_trees=0,
             num_trees_trt=config.num_trees_trt-config.num_shared_trees)
         y_m = norm_input.y_prepared[m].ravel()
@@ -172,6 +173,8 @@ def init_multi_longbet(
             config=child_cfg,
             offset=offset_m,
             num_chains=None,
+            chain_key=(jax.random.fold_in(init_key, m)
+                       if init_key is not None and (num_chains is None or num_chains <= 1) else None),
             mesh=mesh,
             **kwargs,
         )

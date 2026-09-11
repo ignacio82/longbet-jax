@@ -20,6 +20,8 @@ selected periods (or \code{NA} if no periods are selected for that unit).}
 Computes the empirical joint probability of multiple treatment effect events
 by evaluating user-supplied condition functions on each outcome's effect draws,
 taking the conjunction across outcomes, and averaging over draws.
+This scalar-effect interface supports continuous and binary outcomes.
+Ordinal selections raise an error; use the category/score ATT methods.
 }
 \seealso{\code{\link{longbet_multi}}, \code{\link{effect_draws}}}
 \examples{
@@ -30,4 +32,3 @@ p_joint <- joint_prob(pred, list(
 ))
 }
 }
-

@@ -1,5 +1,10 @@
 # Internal helpers shared by the R front door.
 
+.as_np_vector <- function(x) {
+  # reticulate converts length-one R vectors to Python scalars by default.
+  reticulate::import("numpy", convert = FALSE)$atleast_1d(reticulate::r_to_py(x))
+}
+
 #' @keywords internal
 .as_np_matrix <- function(x, name) {
   if (is.null(x)) return(NULL)

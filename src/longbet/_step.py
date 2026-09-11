@@ -33,6 +33,7 @@ from bartz.mcmcstep import step as bartz_step
 from bartz.mcmcstep._step import step_z
 
 from longbet._gp import sample_beta_gp
+from longbet._ordinal import sample_cutpoints, sample_cutpoints_marginalized, sample_ordinal_latents
 from longbet._forest_cache import refresh_prec_tree, current_forest_fit
 from longbet._shared_forest import enable_x64
 from longbet._ridge import ridge_scale_step
@@ -113,7 +114,9 @@ def longbet_single_step(
     obs_mask_f32 = obs_mask.astype(jnp.float32)
     sigma2 = state.sigma2
     alpha = state.alpha
-    is_binary = state.outcome_type_str == "binary"
+    is_binary = state.num_categories == 2
+    is_ordered = state.num_categories > 2
+    cutpoints = state.cutpoints
 
     # Keep the global innovation precision factor and express conditional
     # weights relative to it. These temporary, chain-dependent attributes must
@@ -132,7 +135,19 @@ def longbet_single_step(
     # ------------------------------------------------------------------
     # 0. Probit latent z (binary outcomes only)
     # ------------------------------------------------------------------
-    if is_binary:
+    if is_ordered:
+        # Distinct ordinal-only fold-in tags leave random.split(key, 10) and
+        # every legacy binary/continuous transition unchanged.
+        sd = 1. if conditional_precision is None else lax.rsqrt(conditional_precision)
+        mean = state.z - R
+        cutpoints = sample_cutpoints_marginalized(
+            random.fold_in(key, 8112), cutpoints, state.y, mean, sd, obs_mask, state.cutpoint_prior_scale
+        )
+        current_z = sample_ordinal_latents(
+            random.fold_in(key, 8111), state.y, mean, sd, cutpoints, obs_mask, state.z
+        )
+        R = jnp.where(obs_mask, R + current_z - state.z, 0.)
+    elif is_binary:
         # step_z reconstructs the mean as z - resid * resid_unit, so it recovers
         # alpha*mu + b*beta*nu + gamma correctly without knowing the model has
         # more terms in it -- provided the residual it sees is the full-model one.
@@ -370,7 +385,7 @@ def longbet_single_step(
     # ------------------------------------------------------------------
     if conditional_precision is not None:
         sigma2_new = sigma2
-    elif is_binary:
+    elif is_binary or is_ordered:
         sigma2_new = jnp.float32(1.0)
     else:
         m_obs = jnp.sum(obs_mask_f32)
@@ -411,6 +426,7 @@ def longbet_single_step(
             s.y,
             s.config,
             s.z,
+            s.cutpoints,
             s.resid,
             s.forest,
             s.resid_unit,
@@ -447,6 +463,7 @@ def longbet_single_step(
             view_nu.y,
             view_nu.config,
             current_z,
+            cutpoints,
             R,
             view_mu.forest,
             view_mu.resid_unit,

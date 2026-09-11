@@ -3,8 +3,9 @@
 #' Fits outcome-specific prognostic forests on a shared panel,
 #' using the full precision of a triangular SUR (seemingly unrelated regressions)
 #' likelihood (`full_precision_sur_v1`). Downstream observations inform earlier
-#' means and binary latent responses. Binary equations come first, with zero
-#' incoming loadings and unit marginal latent variance; complete or appropriately
+#' means and discrete latent responses. Binary and ordinal equations come first,
+#' preserving their caller order, with zero incoming loadings and unit marginal
+#' latent variance. Discrete outcomes have no free residual correlation parameter.
 #' Note: aligned draws do not establish calibrated
 #' joint inference. By default treatment trees are outcome-specific. Set
 #' `num_shared_trees > 0` to share that many treatment partitions with vector
@@ -56,7 +57,13 @@
 #'   mean variance one. When `standardize=FALSE`, choose these in outcome units.
 #' @param sigma_b Prior standard deviation of adaptive coding weights.
 #' @param sigma_alpha Prior standard deviation of prognostic scale.
-#' @param outcome Outcome type(s): `"continuous"`, `"binary"`, or a vector of length `M`.
+#' @param outcome Outcome type(s): `"continuous"`, `"binary"`, `"ordinal"`, or a vector of length `M`.
+#' @param num_categories Integer broadcast to ordinal outcomes, or a list in
+#'   user order (optionally fully named), with `NULL` for nonordinal outcomes.
+#'   Every ordinal outcome requires a count >=2 and explicit numeric labels
+#'   `0,...,K-1`; empty categories are allowed. Counts are never inferred.
+#' @param cutpoint_prior_scale Shared finite positive ordered-normal cutpoint
+#'   prior scale in latent probit units. Inactive for nonordinal outcomes or K=2.
 #' @param outcome_names Optional character vector of length `M` naming the outcomes.
 #' @param a_scaling Whether to sample the prognostic scale `alpha`.
 #' @param b_scaling Whether to sample adaptive coding weights `b0`, `b1`.
@@ -121,12 +128,13 @@ longbet_multi <- function(y, x, z, t = NULL,
                           device = c("auto", "cpu", "gpu"),
                           sur = TRUE, sur_prior_var = 1.0,
                           num_shared_trees = 0, shared_variance_fraction = 0.5,
-                          verbose = FALSE, ...) {
+                          verbose = FALSE, num_categories = NULL,
+                          cutpoint_prior_scale = 5.0, ...) {
 
   .reject_unsupported(...)
   .check_shared_treatment_options(num_shared_trees, shared_variance_fraction)
   device <- match.arg(device)
-  lb <- longbet_py()
+  .check_cutpoint_prior(cutpoint_prior_scale)
 
   # ------------------------------------------------------------------
   # 1. Container validation and slice extraction
@@ -230,8 +238,8 @@ longbet_multi <- function(y, x, z, t = NULL,
   # ------------------------------------------------------------------
   resolved_outcomes <- character(M)
   if (is.character(outcome) && length(outcome) == 1L) {
-    if (!outcome %in% c("continuous", "binary")) {
-      stop(sprintf("outcome must be 'continuous' or 'binary', got '%s'.", outcome), call. = FALSE)
+    if (!outcome %in% c("continuous", "binary", "ordinal")) {
+      stop(sprintf("outcome must be 'continuous', 'binary', or 'ordinal', got '%s'.", outcome), call. = FALSE)
     }
     resolved_outcomes <- rep(outcome, M)
   } else if (is.character(outcome) && length(outcome) == M) {
@@ -244,15 +252,18 @@ longbet_multi <- function(y, x, z, t = NULL,
       resolved_outcomes <- outcome
     }
     for (i in seq_len(M)) {
-      if (!resolved_outcomes[i] %in% c("continuous", "binary")) {
-        stop(sprintf("outcome for '%s' must be 'continuous' or 'binary', got '%s'.",
+      if (!resolved_outcomes[i] %in% c("continuous", "binary", "ordinal")) {
+        stop(sprintf("outcome for '%s' must be 'continuous', 'binary', or 'ordinal', got '%s'.",
                      final_names[i], resolved_outcomes[i]), call. = FALSE)
       }
     }
   } else {
-    stop("outcome must be a single string ('continuous' or 'binary') or a vector of length M.",
+    stop("outcome must be a single string ('continuous', 'binary', or 'ordinal') or a vector of length M.",
          call. = FALSE)
   }
+
+  category_counts <- .multi_category_counts(num_categories, resolved_outcomes, final_names)
+  for (i in which(resolved_outcomes == "ordinal")) .check_ordinal_labels(y_list[[i]], category_counts[[i]])
 
   # ------------------------------------------------------------------
   # 4. Validate covariates and panel dimensions
@@ -272,6 +283,7 @@ longbet_multi <- function(y, x, z, t = NULL,
   # ------------------------------------------------------------------
   # 5. Build config and fit Python model
   # ------------------------------------------------------------------
+  lb <- longbet_py()
   config <- lb$LongBetConfig(
     num_sweeps = as.integer(num_sweeps),
     num_burnin = as.integer(num_burnin),
@@ -305,6 +317,8 @@ longbet_multi <- function(y, x, z, t = NULL,
     sigma_b = as.numeric(sigma_b),
     sigma_alpha = as.numeric(sigma_alpha),
     outcome = resolved_outcomes[1],
+    num_categories = category_counts[[1]],
+    cutpoint_prior_scale = as.numeric(cutpoint_prior_scale),
     sample_alpha = as.logical(a_scaling),
     adaptive_coding = as.logical(b_scaling),
     ridge_move = as.logical(ridge_move),
@@ -335,13 +349,14 @@ longbet_multi <- function(y, x, z, t = NULL,
     y = py_y,
     x = .as_np_matrix(x, "x"),
     z = .as_np_matrix(z, "z"),
-    t = reticulate::r_to_py(t),
+    t = .as_np_vector(t),
     x_trt = .as_np_matrix(x_trt, "x_trt"),
     x_tv = .as_np_array3(x_tv, "x_tv"),
     x_trt_tv = .as_np_array3(x_trt_tv, "x_trt_tv"),
     ps = if (is.null(ps)) NULL else reticulate::r_to_py(if (is.matrix(ps)) as.matrix(ps) else as.numeric(ps)),
     outcome = reticulate::r_to_py(as.list(resolved_outcomes)),
-    outcome_names = reticulate::r_to_py(as.list(final_names))
+    outcome_names = reticulate::r_to_py(as.list(final_names)),
+    num_categories = if (any(resolved_outcomes == "ordinal")) reticulate::r_to_py(category_counts) else NULL
   )
 
   # Serialize parent model
@@ -401,6 +416,8 @@ longbet_multi <- function(y, x, z, t = NULL,
       meany = as.numeric(py_child$meany),
       random_intercept = as.logical(random_intercept),
       outcome = as.character(py_child$config$outcome),
+      num_categories = category_counts[[u]],
+      cutpoint_prior_scale = as.numeric(cutpoint_prior_scale),
       multi_origin = reticulate::py_to_r(py_child$multi_origin),
       model_params = list(
         burnin = as.integer(num_burnin),
@@ -428,6 +445,8 @@ longbet_multi <- function(y, x, z, t = NULL,
     fits = child_fits,
     outcome_names = final_names,
     outcome = resolved_outcomes,
+    num_categories = stats::setNames(category_counts, final_names),
+    cutpoint_prior_scale = as.numeric(cutpoint_prior_scale),
     M = M,
     order = as.integer(reticulate::py_to_r(py_model$order)) + 1L,
     inverse_order = as.integer(reticulate::py_to_r(py_model$inverse_order)) + 1L,
@@ -535,7 +554,7 @@ predict.longbet_multi <- function(object, x, z, t = NULL,
   py_pred <- py_model$predict(
     x = .as_np_matrix(x, "x"),
     z = .as_np_matrix(z, "z"),
-    t = reticulate::r_to_py(t),
+    t = .as_np_vector(t),
     x_trt = .as_np_matrix(x_trt, "x_trt"),
     x_tv = .as_np_array3(x_tv, "x_tv"),
     x_trt_tv = .as_np_array3(x_trt_tv, "x_trt_tv"),
@@ -569,8 +588,8 @@ predict.longbet_multi <- function(object, x, z, t = NULL,
       preds = if (isTRUE(summary_only)) NULL else arr(py_child_pred$yhats),
       tauhats.mean = tau$mean, tauhats.sd = tau$std,
       tauhats.lower = tau$lower, tauhats.upper = tau$upper,
-      muhats0.mean = mu0$mean, muhats0.lower = mu0$lower, muhats0.upper = mu0$upper,
-      preds.mean = yhat$mean, preds.lower = yhat$lower, preds.upper = yhat$upper,
+      muhats0.mean = mu0$mean, muhats0.sd = mu0$std, muhats0.lower = mu0$lower, muhats0.upper = mu0$upper,
+      preds.mean = yhat$mean, preds.sd = yhat$std, preds.lower = yhat$lower, preds.upper = yhat$upper,
       att_full = arr(py_child_pred$att_full),
       beta_values = arr(py_child_pred$beta_values),
       s = arr(py_child_pred$s),
@@ -584,6 +603,7 @@ predict.longbet_multi <- function(object, x, z, t = NULL,
       att_counts = as.integer(py_child_pred$att_counts),
       py_pred = py_child_pred
     )
+    res_u <- c(res_u, .ordinal_prediction_fields(py_child_pred))
     class(res_u) <- "longbet.pred"
     child_preds[[name]] <- res_u
   }
@@ -592,6 +612,7 @@ predict.longbet_multi <- function(object, x, z, t = NULL,
     preds = child_preds,
     outcome_names = object$outcome_names,
     outcome = object$outcome,
+    num_categories = object$num_categories,
     summary_only = isTRUE(summary_only),
     alpha = alpha,
     num_chains = as.integer(py_pred$num_chains),
@@ -615,6 +636,7 @@ print.longbet_multi.pred <- function(x, ...) {
   cat(sprintf("  Outcomes:     %d (%s)\n", length(x$outcome_names), paste(x$outcome_names, collapse = ", ")))
   cat(sprintf("  Summary only: %s\n", if (isTRUE(x$summary_only)) "yes" else "no"))
   cat(sprintf("  Chains:       %d\n", x$num_chains))
+  if (any(x$outcome == "ordinal")) cat("  Ordinal children include latent predictions and category probability summaries.\n")
   invisible(x)
 }
 
@@ -624,6 +646,8 @@ print.longbet_multi.pred <- function(x, ...) {
 #' scales. Binary effects are probability differences in [-1, 1]: 0.01 means
 #' one percentage point. Both transformations use the Python engine and remain
 #' usable after saving and restoring ordinary R prediction arrays.
+#' Ordinal selections require an explicit category or score and raise an error;
+#' use [att_probabilities()] or [att_expected_score()] for ordinal ATTs.
 #'
 #' @param pred A `longbet.pred` or `longbet_multi.pred` object.
 #' @param outcome Outcome name or 1-based index (required for multi predictions).
@@ -660,6 +684,9 @@ effect_draws <- function(pred, outcome = NULL) {
     stop("`pred` must be a longbet.pred or longbet_multi.pred object.", call. = FALSE)
   }
 
+  if (identical(child$outcome, "ordinal")) {
+    stop("Ordinal effects require selecting a category or score with att_probabilities() or att_expected_score().", call. = FALSE)
+  }
   if (isTRUE(child$summary_only) || is.null(child$tauhats)) {
     stop("effect_draws requires full posterior draws. Re-run predict() with summary_only = FALSE.", call. = FALSE)
   }
@@ -677,6 +704,9 @@ effect_draws <- function(pred, outcome = NULL) {
 }
 
 #' Empirical joint probability of multiple treatment effect events
+#'
+#' This scalar-effect interface supports continuous and binary outcomes.
+#' Ordinal selections raise an error; use the category/score ATT methods.
 #'
 #' @param pred A `longbet_multi.pred` object with full draws.
 #' @param conditions Named list or sequence of functions in user outcome order.

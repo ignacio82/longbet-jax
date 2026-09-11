@@ -101,6 +101,7 @@ class _MultiMCMCCarry(eqx.Module):
     alpha_traces: tuple[Float32[Array, '...'], ...]
     sigma2_traces: tuple[Float32[Array, '...'], ...]
     sigma_gamma2_traces: tuple[Float32[Array, '...'], ...]
+    cutpoint_traces: tuple[Float32[Array, '...'] | None, ...]
     gamma_loadings_trace: Float32[Array, '...']
 
 
@@ -168,6 +169,7 @@ def _run_multi_longbet_mcmc(
     alpha_traces = []
     sigma2_traces = []
     sigma_gamma2_traces = []
+    cutpoint_traces = []
 
     for m in range(M):
         child = state.states[m]
@@ -187,6 +189,8 @@ def _run_multi_longbet_mcmc(
         alpha_traces.append(jnp.zeros((*chains, n_save_i), jnp.float32))
         sigma2_traces.append(jnp.zeros((*chains, n_save_i), jnp.float32))
         sigma_gamma2_traces.append(jnp.zeros((*chains, n_save_i), jnp.float32))
+        cutpoint_traces.append(jnp.zeros((*chains, n_save_i, child.num_categories - 2), jnp.float32)
+                               if child.outcome_type_str == "ordinal" else None)
 
     gamma_loadings_trace = jnp.zeros((*chains, n_save_i, M, M), jnp.float32)
 
@@ -205,6 +209,7 @@ def _run_multi_longbet_mcmc(
         alpha_traces=tuple(alpha_traces),
         sigma2_traces=tuple(sigma2_traces),
         sigma_gamma2_traces=tuple(sigma_gamma2_traces),
+        cutpoint_traces=tuple(cutpoint_traces),
         gamma_loadings_trace=gamma_loadings_trace,
     )
 
@@ -241,9 +246,13 @@ def _run_multi_longbet_mcmc(
             new_alpha_traces = []
             new_sigma2_traces = []
             new_sigma_gamma2_traces = []
+            new_cutpoint_traces = []
 
             for m_idx in range(M):
                 child_st = new_state.states[m_idx]
+                cp_trace = carry_in.cutpoint_traces[m_idx]
+                new_cutpoint_traces.append(_set_param(cp_trace, main_idx, child_st.cutpoints, sample_axis)
+                                           if cp_trace is not None else None)
                 v_mu, v_nu = _multi_views(new_state, m_idx)
                 new_mu_burnins.append(
                     _set(carry_in.mu_burnins[m_idx], burnin_idx, BurninTrace.from_state(v_mu))
@@ -306,6 +315,7 @@ def _run_multi_longbet_mcmc(
                 alpha_traces=tuple(new_alpha_traces),
                 sigma2_traces=tuple(new_sigma2_traces),
                 sigma_gamma2_traces=tuple(new_sigma_gamma2_traces),
+                cutpoint_traces=tuple(new_cutpoint_traces),
                 gamma_loadings_trace=new_gamma_loadings_trace,
             )
 
@@ -332,6 +342,7 @@ def _run_multi_longbet_mcmc(
             alpha=carry.alpha_traces[m],
             sigma2=carry.sigma2_traces[m],
             sigma_gamma2=carry.sigma_gamma2_traces[m],
+            cutpoints=carry.cutpoint_traces[m],
         )
         child_traces.append(tr)
         b_tr = LongBetBurninTrace(

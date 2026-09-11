@@ -21,6 +21,8 @@ from longbet._design import Design, integer_grid_block, quantile_block
 from longbet._diagnostics import StabilityResult, att_stability
 from longbet._gp import forecast_beta_gp
 from longbet._io import load_npz, save_npz
+from longbet._ordinal import category_probabilities, prepare_ordinal
+from longbet._summary import choose_ordinal_block_size
 from longbet._loop import LongBetTrace, run_longbet_mcmc
 from longbet._state import LongBetState, init_longbet
 from longbet._summary import (
@@ -207,6 +209,15 @@ class LongBetPrediction:
         num_chains: int = 1,
         att_counts: np.ndarray | None = None,
         summary_only: bool = False,
+        num_categories: int | None = None,
+        cutpoints_samples: np.ndarray | None = None,
+        prob_y: np.ndarray | None = None,
+        prob_mu0: np.ndarray | None = None,
+        prob_tau: np.ndarray | None = None,
+        prob_y_summary: PosteriorSummary | None = None,
+        prob_mu0_summary: PosteriorSummary | None = None,
+        prob_tau_summary: PosteriorSummary | None = None,
+        att_prob_full: np.ndarray | None = None,
     ) -> None:
         self.tauhats = tauhats
         self.muhats0 = muhats0
@@ -222,6 +233,71 @@ class LongBetPrediction:
         self.num_chains = int(num_chains)
         self.att_counts = att_counts
         self.summary_only = summary_only
+        self.num_categories = num_categories
+        self.categories = None if num_categories is None else np.arange(num_categories)
+        self.cutpoints_samples = cutpoints_samples
+        self.prob_y, self.prob_mu0, self.prob_tau = prob_y, prob_mu0, prob_tau
+        self.prob_y_summary = prob_y_summary
+        self.prob_mu0_summary = prob_mu0_summary
+        self.prob_tau_summary = prob_tau_summary
+        self.att_prob_full = att_prob_full
+
+    def _require_ordinal(self) -> None:
+        if self.outcome != "ordinal":
+            raise ValueError("This method requires an ordinal prediction.")
+
+    def predict_probabilities(self, arm="factual", summary=True):
+        """Category summaries or draws for factual, control, or effect means.
+
+        Public draws have shape (N,T,K,D). Effects are paired treated-minus-
+        control probability differences, with category sum zero. Bounds use
+        the interval chosen at predict time.
+        """
+        self._require_ordinal()
+        fields = {"factual": "prob_y", "control": "prob_mu0", "effect": "prob_tau"}
+        if arm not in fields:
+            raise ValueError("arm must be 'factual', 'control', or 'effect'")
+        result = getattr(self, fields[arm] + ("_summary" if summary else ""))
+        if result is None:
+            raise ValueError("Full probability draws were discarded; predict with summary_only=False.")
+        return result
+
+    @staticmethod
+    def _summarize_ordinal_att(draws, alpha):
+        if (isinstance(alpha, (bool, np.bool_)) or not np.isscalar(alpha)
+                or not isinstance(alpha, (int, float, np.integer, np.floating))
+                or not np.isfinite(alpha) or not 0 < alpha < 1):
+            raise ValueError("alpha must be finite and strictly between 0 and 1")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            mean = np.mean(draws, axis=-1)
+            intervals = np.percentile(draws, [100*alpha/2, 100*(1-alpha/2)], axis=-1)
+        return {"att": mean, "intervals": intervals, "att_full": draws,
+                "exposure": np.arange(1, draws.shape[0]+1)}
+
+    def att_probabilities(self, alpha=0.05):
+        """Category ATT draws (S,K,D) and summaries over the final draw axis."""
+        self._require_ordinal()
+        result = self._summarize_ordinal_att(self.att_prob_full, alpha)
+        result["categories"] = self.categories
+        return result
+
+    def att_expected_score(self, weights=None, alpha=0.05):
+        """ATT on a user-defined score; default rank scores assume equal spacing.
+
+        Weights need not increase: indicator weights report exceedance or
+        single-category effects. Scores are formed within each posterior draw.
+        """
+        self._require_ordinal()
+        weights = np.asarray(self.categories if weights is None else weights)
+        if (weights.dtype.kind not in "biuf" or weights.shape != (self.num_categories,)
+                or not np.isfinite(weights).all()):
+            raise ValueError(f"weights must contain {self.num_categories} finite numeric values")
+        weights = weights.astype(np.float64)
+        draws = np.einsum("k,skd->sd", weights, self.att_prob_full)
+        result = self._summarize_ordinal_att(draws, alpha)
+        result["weights"] = weights
+        return result
 
     def att(self, alpha: float = 0.05) -> dict[str, Any]:
         """Average treatment effect on the treated, by exposure time.
@@ -401,6 +477,9 @@ class LongBet:
         if x_np.ndim != 2 or x_np.shape[0] != N:
             raise ValueError(f"x must be (N, P) with N={N}, got {x_np.shape}")
 
+        if self.config.outcome == "ordinal":
+            # Validate original dtype before float conversion could accept strings.
+            prepare_ordinal(y, self.config.num_categories)
         y_np = np.asarray(y, dtype=np.float64)
         y_mat = y_np.reshape(N, T) if y_np.ndim == 1 else y_np
         if y_mat.shape != (N, T):
@@ -445,7 +524,12 @@ class LongBet:
         # and letting their NaNs through would only raise spurious warnings.
         y_clean = np.where(obs_mask, y_vec, 0.0)
         obs_y = y_vec[obs_mask]
-        if self.config.outcome == "binary":
+        if self.config.outcome == "ordinal":
+            prepared = prepare_ordinal(y_vec, self.config.num_categories)
+            self.meany, self.sdy = 0.0, 1.0
+            self.offset_ = prepared.offset
+            y_proc = prepared.labels
+        elif self.config.outcome == "binary":
             uniq = np.unique(obs_y)
             if not np.all(np.isin(uniq, (0.0, 1.0))):
                 raise ValueError(
@@ -518,6 +602,9 @@ class LongBet:
         )
         self.state = result.final_state
         self.trace = result.main_trace
+        if self.config.outcome == "ordinal":
+            # Surface checked interval failures before returning a fitted model.
+            jax.block_until_ready((self.state.z, self.trace.cutpoints))
         return self
 
     # -- design construction ------------------------------------------------
@@ -829,6 +916,13 @@ class LongBet:
         alpha_d = flat(self.trace.alpha)[:, None]
         gamma_flat = flat(np.asarray(self.trace.gamma))
         D = beta_flat.shape[0]
+        K = self.config.num_categories if self.config.outcome == "ordinal" else None
+        cutpoints = None
+        if K is not None:
+            if self.trace.cutpoints is None:
+                raise ValueError("Ordinal predictions require saved cutpoint draws.")
+            # Explicit D avoids reshape(-1, 0) for the ordinal binary limit.
+            cutpoints = np.asarray(self.trace.cutpoints).reshape(D, K - 2)
 
         has_gamma = gamma_flat.shape[1] == N
         if not has_gamma:
@@ -846,6 +940,8 @@ class LongBet:
 
         # -- blocked evaluation ------------------------------------------------
         blk = block_size or choose_block_size(D, M)
+        if K is not None:
+            blk = min(blk, choose_ordinal_block_size(D, M, K))
         blk = max(1, min(int(blk), M))
         scale, centre = self.sdy, self.meany
 
@@ -861,6 +957,11 @@ class LongBet:
         stats_tau = BlockAccumulator(M, alpha)
         stats_mu0 = BlockAccumulator(M, alpha)
         stats_y = BlockAccumulator(M, alpha)
+        prob_out = prob_stats = att_prob_sums = None
+        if K is not None:
+            prob_out = [np.empty((M, K, D), np.float64) if keep else None for _ in range(3)]
+            prob_stats = [BlockAccumulator(M * K, alpha, dtype=np.float64) for _ in range(3)]
+            att_prob_sums = np.zeros((S_max_out, K, D), np.float64)
 
         nu_trace, mu_trace = self.trace.nu_trace, self.trace.mu_trace
         # When the treatment forest cannot split on the exposure index, the
@@ -931,6 +1032,18 @@ class LongBet:
                 np.add.at(att_sums, idx, tau[:, treated].T.astype(np.float64))
                 att_counts += np.bincount(idx, minlength=S_max_out)
 
+            if K is not None:
+                p0 = category_probabilities(mu0, cutpoints)
+                delta = category_probabilities(mu0 + tau, cutpoints)
+                delta -= p0
+                py = category_probabilities(yhat, cutpoints)
+                if treated.any():
+                    np.add.at(att_prob_sums, idx, delta[:, treated, :].transpose(1, 2, 0))
+                for acc, out, values in zip(prob_stats, prob_out, (py, p0, delta)):
+                    acc.update(lo*K, hi*K, values.reshape(D, (hi-lo)*K))
+                    if keep:
+                        out[sl] = values.transpose(1, 2, 0)
+
             stats_tau.update(lo, hi, tau)
             stats_mu0.update(lo, hi, mu0)
             stats_y.update(lo, hi, yhat)
@@ -951,6 +1064,16 @@ class LongBet:
         def to_panel(s: PosteriorSummary) -> PosteriorSummary:
             return PosteriorSummary(*(np.asarray(v).reshape(N, T) for v in s))
 
+        ordinal_fields = {}
+        if K is not None:
+            ordinal_fields = dict(num_categories=K, cutpoints_samples=cutpoints,
+                att_prob_full=np.where(att_counts[:, None, None] > 0,
+                    att_prob_sums / np.maximum(att_counts, 1)[:, None, None], np.nan))
+            for name, acc, out in zip(("prob_y", "prob_mu0", "prob_tau"), prob_stats, prob_out):
+                ordinal_fields[name] = out.reshape(N, T, K, D) if keep else None
+                ordinal_fields[name + "_summary"] = PosteriorSummary(
+                    *(v.reshape(N, T, K) for v in acc.result()))
+
         return LongBetPrediction(
             tauhats=tau_out.T.reshape(N, T, D) if keep else None,
             muhats0=mu0_out.T.reshape(N, T, D) if keep else None,
@@ -966,6 +1089,7 @@ class LongBet:
             num_chains=self.config.num_chains,
             att_counts=att_counts,
             summary_only=summary_only,
+            **ordinal_fields,
         )
 
     @property

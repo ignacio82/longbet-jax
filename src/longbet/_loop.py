@@ -35,6 +35,7 @@ class LongBetTrace(eqx.Module):
     alpha: Float32[Array, '...']
     sigma2: Float32[Array, '...']
     sigma_gamma2: Float32[Array, '...']
+    cutpoints: Float32[Array, '...'] | None = None
 
 
 class LongBetBurninTrace(eqx.Module):
@@ -69,6 +70,7 @@ class _MCMCCarry(eqx.Module):
     alpha_trace: Float32[Array, '...']
     sigma2_trace: Float32[Array, '...']
     sigma_gamma2_trace: Float32[Array, '...']
+    cutpoints_trace: Float32[Array, '...'] | None
 
 
 def _make_views(state: LongBetState) -> tuple[State, State]:
@@ -191,6 +193,8 @@ def run_longbet_mcmc(
         alpha_trace=jnp.zeros((*chains, n_save_i), jnp.float32),
         sigma2_trace=jnp.zeros((*chains, n_save_i), jnp.float32),
         sigma_gamma2_trace=jnp.zeros((*chains, n_save_i), jnp.float32),
+        cutpoints_trace=(jnp.zeros((*chains, n_save_i, state.num_categories - 2), jnp.float32)
+                         if state.outcome_type_str == "ordinal" else None),
     )
 
     inner_length = n_iters if inner_loop_length is None else max(1, int(inner_loop_length))
@@ -232,6 +236,9 @@ def run_longbet_mcmc(
                 sigma_gamma2_trace=_set_param(
                     carry_in.sigma_gamma2_trace, main_idx, new_state.sigma_gamma2, sample_axis
                 ),
+                cutpoints_trace=(_set_param(carry_in.cutpoints_trace, main_idx,
+                                           new_state.cutpoints, sample_axis)
+                                 if carry_in.cutpoints_trace is not None else None),
             )
 
         return lax.while_loop(cond_fn, body_fn, c)
@@ -255,6 +262,7 @@ def run_longbet_mcmc(
         alpha=carry.alpha_trace,
         sigma2=carry.sigma2_trace,
         sigma_gamma2=carry.sigma_gamma2_trace,
+        cutpoints=carry.cutpoints_trace,
     )
     burnin_trace = (
         LongBetBurninTrace(mu_trace=carry.mu_burnin, nu_trace=carry.nu_burnin)

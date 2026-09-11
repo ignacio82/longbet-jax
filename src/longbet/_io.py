@@ -26,6 +26,75 @@ _FOREST_KEYS = ("leaf_tree", "split_tree", "var_tree", "offset", "leaf_unit", "e
 # Both scalar and coupled fits used stale bartz leaf precision sums before this
 # contract was introduced. Loading trees cannot repair their posterior draws.
 PRECISION_CACHE_VERSION = 1
+ORDINAL_SCHEMA_VERSION = 1
+
+
+def ordinal_metadata(num_categories: int, prior_scale: float) -> dict[str, Any]:
+    """Link and identification contract shared by scalar and child archives."""
+    return {"num_categories": num_categories, "cutpoint_prior_scale": prior_scale,
+            "cutpoint_anchor": "first_finite_zero",
+            "ordinal_schema_version": ORDINAL_SCHEMA_VERSION}
+
+
+def validate_ordinal_arrays(data, prefix, num_categories, prior_scale, metadata, draw_shape):
+    """Validate one ordinal equation's metadata, thresholds, and saved variances."""
+    def require(ok, message):
+        if not ok:
+            raise ValueError(f"Invalid ordinal archive: {message}")
+    for key, expected in ordinal_metadata(num_categories, prior_scale).items():
+        value = metadata.get(key)
+        require(type(value) is type(expected) and value == expected,
+                f"{prefix}{key} disagrees with the ordinal model schema.")
+    key = f"{prefix}cutpoints"
+    require(key in data, f"missing {key} (required even for K=2).")
+    cuts = np.asarray(data[key])
+    require(cuts.dtype.kind == "f" and cuts.shape == (*draw_shape, num_categories - 2),
+            f"invalid cutpoint shape/dtype in {key}.")
+    require(np.isfinite(cuts).all(), "nonfinite cutpoints.")
+    require((np.diff(np.concatenate((np.zeros((*draw_shape, 1)), cuts), axis=-1), axis=-1) > 0).all(),
+            "free cutpoints must be strictly ordered and positive.")
+    for suffix in ("sigma2", "mu_error_cov_inv", "nu_error_cov_inv"):
+        key = f"{prefix}{suffix}"
+        require(key in data, f"missing {key}.")
+        arr = np.asarray(data[key])
+        require(arr.shape == draw_shape and (arr == 1).all(),
+                f"{key} must have aligned draws and equal one.")
+    return cuts
+
+
+def _validate_scalar_ordinal(data, config, meta):
+    for key in ("N", "T", "S_max"):
+        value = meta.get(key)
+        if type(value) is not int or value < (0 if key == "S_max" else 1):
+            raise ValueError(f"Invalid ordinal archive: invalid {key}")
+    chains = config.num_chains > 1
+    if meta.get("has_chains") is not chains:
+        raise ValueError("Invalid ordinal archive: chain metadata disagrees with config")
+    draw_shape = ((config.num_chains,) if chains else ()) + (config.num_sweeps,)
+    cuts = validate_ordinal_arrays(data, "", config.num_categories,
+                                   config.cutpoint_prior_scale, meta, draw_shape)
+    if meta.get("meany") != 0 or meta.get("sdy") != 1:
+        raise ValueError("Invalid ordinal archive: latent scale must be unstandardized")
+    for key in _PARAM_KEYS:
+        if key not in data:
+            raise ValueError(f"Invalid ordinal archive: missing {key}")
+        arr = np.asarray(data[key])
+        extra = (meta["S_max"]+1,) if key == "beta" else (meta["N"],) if key == "gamma" else ()
+        if arr.dtype.kind != "f" or arr.shape != (*draw_shape, *extra) or not np.isfinite(arr).all():
+            raise ValueError(f"Invalid ordinal archive: invalid shape or values in {key}")
+    for forest in ("mu", "nu"):
+        trees = config.num_trees_pr if forest == "mu" else config.num_trees_trt
+        depth = config.max_depth_pr if forest == "mu" else config.max_depth_trt
+        for key in _FOREST_KEYS:
+            name = f"{forest}_{key}"
+            if name not in data:
+                raise ValueError(f"Invalid ordinal archive: missing {name}")
+            arr = np.asarray(data[name])
+            shape = (() if key in ("offset", "leaf_unit") else draw_shape if key == "error_cov_inv"
+                     else (*draw_shape, trees, 2**(depth if key == "leaf_tree" else depth-1)))
+            if arr.shape != shape or arr.dtype.kind not in "iuf" or not np.isfinite(arr).all():
+                raise ValueError(f"Invalid ordinal archive: invalid shape or values in {name}")
+    return cuts
 
 
 def _require_current_precision_cache(meta: dict[str, Any]) -> None:
@@ -73,6 +142,13 @@ def save_npz(
     for prefix, sub in (("mu", trace.mu_trace), ("nu", trace.nu_trace)):
         for key in _FOREST_KEYS:
             arrays[f"{prefix}_{key}"] = np.asarray(getattr(sub, key))
+
+    if config.outcome == "ordinal":
+        meta.update(ordinal_metadata(config.num_categories, config.cutpoint_prior_scale))
+        if trace.cutpoints is None:
+            raise ValueError("Ordinal archives require cutpoints, including the K=2 empty array")
+        arrays["cutpoints"] = np.asarray(trace.cutpoints)
+        _validate_scalar_ordinal(arrays, config, meta)
 
     arrays["_config_json"] = json.dumps(config.to_dict())
     arrays["_meta_json"] = json.dumps(meta)
@@ -124,6 +200,7 @@ def load_npz(
             "Use LongBetMulti.load() or load_multi_npz() to load this model."
         )
     _require_current_precision_cache(meta)
+    cutpoints = _validate_scalar_ordinal(data, config, meta) if config.outcome == "ordinal" else None
     origin = meta.get("multi_origin")
     if origin is not None:
         # Extracting one marginal must not bypass validation of its joint target.
@@ -139,5 +216,6 @@ def load_npz(
         mu_trace=_rebuild_trace(data, "mu", has_chains),
         nu_trace=_rebuild_trace(data, "nu", has_chains),
         **{k: jnp.asarray(data[k]) for k in _PARAM_KEYS},
+        cutpoints=None if cutpoints is None else jnp.asarray(cutpoints),
     )
     return trace, config, meany, sdy, meta

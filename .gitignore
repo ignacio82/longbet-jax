@@ -8,3 +8,5 @@ build/
 .Rproj.user/
 ..Rcheck/
 *.tar.gz
+benchmarks/ordinal_results/.tmp/
+benchmarks/ordinal_results/logs/

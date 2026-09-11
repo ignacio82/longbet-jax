@@ -14,11 +14,12 @@ longbet(y, x, z, t = NULL, x_trt = NULL, x_tv = NULL, x_trt_tv = NULL,
   split_time_ps = TRUE, split_time_trt = TRUE, random_intercept = TRUE,
   gamma_prior_a = 1, gamma_prior_b = 0.1, sigma_prior_a = 0,
   sigma_prior_b = 0, sigma_b = 0.7071067811865476, sigma_alpha = 1,
-  outcome = c("continuous", "binary"), a_scaling = FALSE, b_scaling = TRUE,
+  outcome = c("continuous", "binary", "ordinal"), a_scaling = FALSE, b_scaling = TRUE,
   ridge_move = TRUE, ridge_proposal_sigma = 0.2, standardize = TRUE,
   random_seed = 0, device = c("auto", "cpu", "gpu"),
   sur = TRUE, sur_prior_var = 1, num_shared_trees = 0,
-  shared_variance_fraction = 0.5, verbose = FALSE, ...)
+  shared_variance_fraction = 0.5, verbose = FALSE, num_categories = NULL,
+  cutpoint_prior_scale = 5.0, ...)
 }
 \arguments{
 \item{y}{Outcome panel, \code{[N x T]}. \code{NA} marks an unobserved cell;
@@ -65,7 +66,12 @@ variance.}
 \code{(0, 0)} is the improper reference prior.}
 \item{sigma_b}{Prior standard deviation of the adaptive coding weights.}
 \item{sigma_alpha}{Prior standard deviation of the prognostic scale.}
-\item{outcome}{\code{"continuous"} or \code{"binary"} (probit).}
+\item{outcome}{\code{"continuous"}, \code{"binary"} (probit), or \code{"ordinal"} (ordered probit).}
+\item{num_categories}{Declared integer category count >=2 for ordinal outcomes;
+\code{NULL} otherwise. Use explicit numeric labels \code{0,...,K-1}.
+Empty categories are allowed; ordinal outcomes are never standardized.}
+\item{cutpoint_prior_scale}{Finite positive ordered-normal cutpoint prior scale
+in latent probit units, default 5. Inactive for nonordinal outcomes or K=2.}
 \item{a_scaling}{Whether to sample the prognostic scale \code{alpha}.}
 \item{b_scaling}{Whether to sample the adaptive coding weights \code{b0},
 \code{b1}. On by default.}

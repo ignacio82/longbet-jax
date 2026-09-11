@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+from numbers import Integral, Real
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -139,7 +140,11 @@ class LongBetConfig:
     sigma_alpha
         Prior standard deviation of the prognostic scale alpha.
     outcome
-        'continuous' or 'binary' (probit link).
+        'continuous', 'binary', or 'ordinal' (ordered probit link).
+    num_categories
+        Declared ordinal category count (>=2); None for other outcomes.
+    cutpoint_prior_scale
+        Positive ordered-normal prior scale in latent probit units.
     sample_alpha
         Whether to sample the prognostic scale alpha. Off by default: its
         posterior concentrates tightly around 1 and it exists to help XBART
@@ -230,7 +235,9 @@ class LongBetConfig:
     sigma_alpha: float = 1.0
 
     # --- outcome and moves --------------------------------------------------
-    outcome: Literal["continuous", "binary"] = "continuous"
+    outcome: Literal["continuous", "binary", "ordinal"] = "continuous"
+    num_categories: int | None = None
+    cutpoint_prior_scale: float = 5.0
     sample_alpha: bool = False
     sample_beta: bool = True
     adaptive_coding: bool = True
@@ -276,10 +283,24 @@ class LongBetConfig:
             raise ValueError(f"n_skip must be >= 1, got {self.n_skip}")
         if self.num_chains < 1:
             raise ValueError(f"num_chains must be >= 1, got {self.num_chains}")
-        if self.outcome not in ("continuous", "binary"):
+        if self.outcome not in ("continuous", "binary", "ordinal"):
             raise ValueError(
-                f"outcome must be 'continuous' or 'binary', got {self.outcome!r}"
+                f"outcome must be 'continuous', 'binary', or 'ordinal', got {self.outcome!r}"
             )
+        if self.outcome == "ordinal":
+            if (isinstance(self.num_categories, bool)
+                    or not isinstance(self.num_categories, Integral)
+                    or self.num_categories < 2):
+                raise ValueError("num_categories must be an integer >=2 for ordinal outcomes")
+            object.__setattr__(self, "num_categories", int(self.num_categories))
+        elif self.num_categories is not None:
+            raise ValueError("num_categories must be None for nonordinal configurations")
+        if (isinstance(self.cutpoint_prior_scale, bool)
+                or not isinstance(self.cutpoint_prior_scale, Real)
+                or not math.isfinite(self.cutpoint_prior_scale)
+                or self.cutpoint_prior_scale <= 0):
+            raise ValueError("cutpoint_prior_scale must be finite and positive")
+        object.__setattr__(self, "cutpoint_prior_scale", float(self.cutpoint_prior_scale))
         if self.device not in ("auto", "cpu", "gpu"):
             raise ValueError(
                 f"device must be 'auto', 'cpu' or 'gpu', got {self.device!r}"

@@ -13,7 +13,7 @@
 #
 # Adding a configuration option without touching this file fails the Python
 # test; exposing it in R with a different default fails the R test.
-version: "2.1.0"
+version: "2.2.0"
 
 # Config fields that are deliberately not part of the user-facing contract.
 internal:
@@ -227,7 +227,19 @@ arguments:
     type: string
     default: "continuous"
     expose_in_r: true
-    description: Outcome type, continuous or binary (probit).
+    description: Outcome type, continuous, binary (probit), or ordinal (ordered probit).
+  - python_name: num_categories
+    r_name: num_categories
+    type: integer_or_null
+    default: null
+    expose_in_r: true
+    description: Declared ordinal category count >=2; null for nonordinal configurations.
+  - python_name: cutpoint_prior_scale
+    r_name: cutpoint_prior_scale
+    type: float
+    default: 5.0
+    expose_in_r: true
+    description: Positive finite ordered-normal cutpoint prior scale in latent probit units.
   - python_name: sample_alpha
     r_name: a_scaling
     type: boolean
@@ -402,13 +414,15 @@ return_fields:
 
 multi_api:
   description: >-
-    Multiple continuous and binary outcomes on a shared panel using full-precision
-    triangular SUR, including downstream feedback into binary latent responses.
+    Multiple continuous, binary and ordinal outcomes on a shared panel using full-precision
+    triangular SUR, including downstream feedback into discrete latent responses.
     Prognostic forests remain outcome-specific. Optional shared treatment
     partitions have vector leaves and regularized private components.
   sampler_semantics: "full_precision_sur_v1"
   shared_sampler_semantics: "shared_private_sur_v1"
   shared_format_version: 2
+  ordinal_format_version: 3
+  ordinal_schema_version: 1
   shared_treatment_trace_layout: "private_then_shared"
   precision_cache_version: 1
   variance_prior_requirement: >-
@@ -433,8 +447,15 @@ multi_api:
       type: "string, Sequence[string], or Mapping[str, string]"
       default: "continuous"
       description: >-
-        Outcome type per outcome ('continuous' or 'binary'). Binary outcomes precede
-        continuous ones in internal sampling order and have zero incoming SUR loadings.
+        Outcome type per outcome ('continuous', 'binary', or 'ordinal'). Discrete
+        outcomes precede continuous ones in a stable partition and have zero
+        incoming SUR loadings and unit structural variance.
+    num_categories:
+      type: "integer, sequence/list with nulls, or fully named mapping/list"
+      default: null
+      description: >-
+        Integer broadcast to ordinal outcomes, or entries in user order with
+        null/NULL for nonordinal outcomes. Missing counts are never inferred.
     outcome_names:
       type: "Sequence[str] or NULL"
       description: Length-M unique nonempty outcome names.
@@ -482,3 +503,27 @@ multi_api:
       description: >-
         Mean of per-draw implied innovation correlation matrices in user order,
         shape (M, M), with unit diagonal and float64 precision.
+
+ordinal_api:
+  identification: "first_finite_zero"
+  probit_variance: 1
+  prediction_fields:
+    cutpoints_samples: "(D, K-2), including the empty last dimension for K=2"
+    prob_y: "(N, T, K, D); factual category probabilities, null in summary mode"
+    prob_mu0: "(N, T, K, D); control probabilities, null in summary mode"
+    prob_tau: "(N, T, K, D); paired treated-minus-control effects, null in summary mode"
+    prob_y_summary: "mean/std/lower/upper, each (N, T, K)"
+    prob_mu0_summary: "mean/std/lower/upper, each (N, T, K)"
+    prob_tau_summary: "mean/std/lower/upper, each (N, T, K)"
+    att_prob_full: "(S, K, D), always retained"
+  methods:
+    predict_probabilities: "arm=factual/control/effect; summary defaults true"
+    att_probabilities: "att (S,K), intervals (2,S,K), att_full (S,K,D), exposure, categories"
+    att_expected_score: "finite numeric weights length K; returns att (S), intervals (2,S), att_full (S,D), exposure, weights"
+  limitations: >-
+    Existing latent ATT and stability APIs keep their meaning. Diagnose category,
+    score and cutpoint draws separately. effect_draws/effect_draws_from_arrays and
+    joint_prob reject ordinal selections; use the category/score methods.
+    New-unit probabilities use zero intercepts when unit counts differ, not a
+    marginal random-unit distribution. Forest-evaluation caching intentionally
+    retains full latent forest buffers and is disabled by default.

@@ -28,7 +28,11 @@
 #'   described as such. Defaults to the fitted values.
 #' @param cache_forest_evaluations Whether to cache prognostic forest evaluations.
 #' @param ... Reserved; unsupported arguments are an error.
-#' @return An object of class `longbet.pred`.
+#' @return An object of class `longbet.pred`. Ordinal predictions also contain
+#'   `num_categories`, `categories`, `cutpoints_samples` `[draws x (K-2)]`,
+#'   `prob_y`, `prob_mu0`, `prob_tau` `[N x T x K x draws]` (NULL in summary
+#'   mode), their `*_summary` lists `[N x T x K]`, and `att_prob_full`
+#'   `[S x K x draws]`. Existing prediction fields remain on the latent scale.
 #' @export
 predict.longbet <- function(object, x, z, t = NULL,
                             x_trt = NULL, x_tv = NULL, x_trt_tv = NULL, ps = NULL,
@@ -55,7 +59,7 @@ predict.longbet <- function(object, x, z, t = NULL,
   py_pred <- py_model$predict(
     x = .as_np_matrix(x, "x"),
     z = .as_np_matrix(z, "z"),
-    t = reticulate::r_to_py(t),
+    t = .as_np_vector(t),
     x_trt = .as_np_matrix(x_trt, "x_trt"),
     x_tv = .as_np_array3(x_tv, "x_tv"),
     x_trt_tv = .as_np_array3(x_trt_tv, "x_trt_tv"),
@@ -82,8 +86,8 @@ predict.longbet <- function(object, x, z, t = NULL,
     preds = if (isTRUE(summary_only)) NULL else arr(py_pred$yhats),
     tauhats.mean = tau$mean, tauhats.sd = tau$std,
     tauhats.lower = tau$lower, tauhats.upper = tau$upper,
-    muhats0.mean = mu0$mean, muhats0.lower = mu0$lower, muhats0.upper = mu0$upper,
-    preds.mean = yhat$mean, preds.lower = yhat$lower, preds.upper = yhat$upper,
+    muhats0.mean = mu0$mean, muhats0.sd = mu0$std, muhats0.lower = mu0$lower, muhats0.upper = mu0$upper,
+    preds.mean = yhat$mean, preds.sd = yhat$std, preds.lower = yhat$lower, preds.upper = yhat$upper,
     att_full = arr(py_pred$att_full),
     beta_values = arr(py_pred$beta_values),
     s = arr(py_pred$s),
@@ -96,6 +100,7 @@ predict.longbet <- function(object, x, z, t = NULL,
     att_counts = as.integer(py_pred$att_counts),
     py_pred = py_pred
   )
+  res <- c(res, .ordinal_prediction_fields(py_pred))
   class(res) <- "longbet.pred"
   res
 }
@@ -109,6 +114,9 @@ print.longbet.pred <- function(x, ...) {
   cat(sprintf("  Full draws kept: %s\n", if (x$summary_only) "no (summary_only)" else "yes"))
   if (identical(x$outcome, "binary")) {
     cat("  Scale: latent probit. Apply pnorm() to preds/muhats0 for probabilities.\n")
+  }
+  if (identical(x$outcome, "ordinal")) {
+    cat(sprintf("  Scale: latent probit; category probabilities and effects available for %d categories.\n", x$num_categories))
   }
   invisible(x)
 }

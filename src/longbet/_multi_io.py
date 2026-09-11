@@ -15,9 +15,11 @@ from longbet._design import Design
 from longbet._io import (
     _FOREST_KEYS, _PARAM_KEYS, _rebuild_trace,
     PRECISION_CACHE_VERSION, _require_current_precision_cache,
+    ORDINAL_SCHEMA_VERSION, ordinal_metadata, validate_ordinal_arrays,
 )
 from longbet._loop import LongBetTrace
 from longbet._multi_loop import MultiLongBetTrace
+from longbet._multi_input import resolve_category_counts
 from longbet._sur import SAMPLER_SEMANTICS
 from longbet._shared_forest import SHARED_SAMPLER_SEMANTICS
 
@@ -37,14 +39,15 @@ def _validate_archive(data: Any, meta: dict[str, Any], config: LongBetConfig) ->
     types = meta.get("user_outcomes", [])
     require(len(names) == M and all(isinstance(n, str) and n.strip() for n in names), "invalid outcome names.")
     require(len(set(names)) == M, "duplicate outcome names.")
-    require(len(types) == M and all(t in ("continuous", "binary") for t in types), "invalid outcome types.")
+    require(len(types) == M and all(t in ("continuous", "binary", "ordinal") for t in types), "invalid outcome types.")
+    ordinal = "ordinal" in types
     config.validate_multi_variance_prior(tuple(types))
     order = meta.get("order", [])
     inverse = meta.get("inverse_order", [])
     require(len(order) == M and all(type(i) is int for i in order) and sorted(order) == list(range(M)), "invalid order permutation.")
     require(inverse == np.argsort(order).tolist(), "inverse_order does not invert order.")
-    expected_order = [i for typ in ("binary", "continuous") for i in range(M) if types[i] == typ]
-    require(order == expected_order, "order is not the stable binary-first permutation.")
+    expected_order = [i for discrete in (True, False) for i in range(M) if (types[i] != "continuous") == discrete]
+    require(order == expected_order, "order is not the stable discrete-first (binary-first for legacy fits) permutation.")
     require(meta.get("internal_names") == [names[i] for i in order], "internal names disagree with order.")
     require(meta.get("internal_outcomes") == [types[i] for i in order], "internal types disagree with order.")
     for key in ("meany", "sdy", "offset_"):
@@ -63,7 +66,17 @@ def _validate_archive(data: Any, meta: dict[str, Any], config: LongBetConfig) ->
     expected_semantics = SHARED_SAMPLER_SEMANTICS if sharing else SAMPLER_SEMANTICS
     require(meta.get("sampler_semantics") == expected_semantics,
             "unsupported sampler semantics.")
-    require(meta.get("format_version", 1) == (2 if sharing else 1), "format does not match treatment sharing.")
+    require(meta.get("format_version", 1) == (3 if ordinal else 2 if sharing else 1), "format does not match ordinal outcomes/treatment sharing.")
+    if ordinal:
+        require(type(meta.get("ordinal_schema_version")) is int and
+                meta["ordinal_schema_version"] == ORDINAL_SCHEMA_VERSION, "unsupported ordinal schema.")
+        require("num_categories" in meta and "internal_num_categories" in meta,
+                "missing ordinal category counts.")
+        counts = resolve_category_counts(meta["num_categories"], names, types)
+        require(meta["num_categories"] == list(counts), "invalid category metadata.")
+        require(meta["internal_num_categories"] == [counts[i] for i in order],
+                "internal category counts disagree with order.")
+        require(len(meta.get("ordinal_metadata", [])) == M, "missing per-outcome ordinal metadata.")
     if sharing:
         require(meta.get("num_shared_trees") == config.num_shared_trees and
                 meta.get("shared_variance_fraction") == config.shared_variance_fraction,
@@ -83,15 +96,24 @@ def _validate_archive(data: Any, meta: dict[str, Any], config: LongBetConfig) ->
     gamma = array("gamma_loadings", (*draw_shape, M, M))
     require(np.all(np.triu(gamma) == 0), "Gamma must be strictly lower triangular.")
     for m, typ in enumerate(meta["internal_outcomes"]):
-        if typ == "binary" or not config.sur_active:
-            require(np.all(gamma[..., m, :] == 0), "inactive/binary Gamma row must be zero.")
+        if typ != "continuous" or not config.sur_active:
+            require(np.all(gamma[..., m, :] == 0), "inactive/discrete Gamma row must be zero.")
+        if ordinal:
+            child_meta = meta["ordinal_metadata"][m]
+            if typ == "ordinal":
+                require(isinstance(child_meta, dict), "missing ordinal child metadata.")
+                validate_ordinal_arrays(data, f"outcome_{m}_", counts[order[m]],
+                    config.cutpoint_prior_scale, child_meta, draw_shape)
+                require(meta["meany"][m] == 0 and meta["sdy"][m] == 1, "ordinal scale must be unstandardized.")
+            else:
+                require(child_meta is None, "nonordinal child has ordinal metadata.")
         for key in _PARAM_KEYS:
             extra = (meta["S_max"] + 1,) if key == "beta" else (meta["N"],) if key == "gamma" else ()
             a = array(f"outcome_{m}_{key}", (*draw_shape, *extra))
             if key == "sigma2":
                 require(np.all(a > 0), "sigma2 must be positive.")
-                if typ == "binary":
-                    require(np.all(a == 1), "binary sigma2 must equal one.")
+                if typ != "continuous":
+                    require(np.all(a == 1), "discrete sigma2 must equal one.")
         for forest in ("mu", "nu"):
             for key in _FOREST_KEYS:
                 name = f"outcome_{m}_{forest}_{key}"
@@ -100,12 +122,12 @@ def _validate_archive(data: Any, meta: dict[str, Any], config: LongBetConfig) ->
                 # Offsets and leaf units are shared constants, not traces.
                 expected_prefix = () if key in ("offset", "leaf_unit") else draw_shape
                 require(a.shape[:len(expected_prefix)] == expected_prefix and np.all(np.isfinite(a)), f"invalid draw axes or non-finite values in {name}.")
-                if sharing and key in ("leaf_tree", "var_tree", "split_tree"):
+                if (sharing or ordinal) and key in ("leaf_tree", "var_tree", "split_tree"):
                     J = config.num_trees_pr if forest == "mu" else config.num_trees_trt
                     depth = config.max_depth_pr if forest == "mu" else config.max_depth_trt
                     slots = 2**depth if key == "leaf_tree" else 2**(depth-1)
                     require(a.shape == (*draw_shape, J, slots), f"invalid combined forest shape in {name}.")
-                    if forest == "nu" and key != "leaf_tree" and m > 0:
+                    if sharing and forest == "nu" and key != "leaf_tree" and m > 0:
                         first = np.asarray(data[f"outcome_0_nu_{key}"])
                         require(np.array_equal(a[..., -config.num_shared_trees:, :],
                                                first[..., -config.num_shared_trees:, :]),
@@ -133,7 +155,7 @@ def save_multi_npz(model: LongBetMulti, path: str | Path) -> None:
 
     meta: dict[str, Any] = {
         "model_kind": "multi",
-        "format_version": 2 if model.config.num_shared_trees else 1,
+        "format_version": 3 if "ordinal" in model.outcome else 2 if model.config.num_shared_trees else 1,
         "precision_cache_version": PRECISION_CACHE_VERSION,
         "M": M,
         "outcome_names": list(model.outcome_names),
@@ -165,6 +187,13 @@ def save_multi_npz(model: LongBetMulti, path: str | Path) -> None:
         ),
     }
 
+    if "ordinal" in model.outcome:
+        meta.update(ordinal_schema_version=ORDINAL_SCHEMA_VERSION,
+            num_categories=list(model.num_categories),
+            internal_num_categories=list(model.internal_num_categories),
+            ordinal_metadata=[ordinal_metadata(model.internal_num_categories[m], model.config.cutpoint_prior_scale)
+                              if model.outcome[model.order[m]] == "ordinal" else None for m in range(M)])
+
     arrays: dict[str, Any] = {
         "_config_json": json.dumps(model.config.to_dict()),
         "_meta_json": json.dumps(meta),
@@ -174,12 +203,18 @@ def save_multi_npz(model: LongBetMulti, path: str | Path) -> None:
     # Store traces for each internal equation
     for m in range(M):
         tr = model.trace.traces[m]
+        if model.outcome[model.order[m]] == "ordinal":
+            if tr.cutpoints is None:
+                raise ValueError("Ordinal multi archives require cutpoint traces")
+            arrays[f"outcome_{m}_cutpoints"] = np.asarray(tr.cutpoints)
         for k in _PARAM_KEYS:
             arrays[f"outcome_{m}_{k}"] = np.asarray(getattr(tr, k))
         for prefix, sub in (("mu", tr.mu_trace), ("nu", tr.nu_trace)):
             for key in _FOREST_KEYS:
                 arrays[f"outcome_{m}_{prefix}_{key}"] = np.asarray(getattr(sub, key))
 
+    if "ordinal" in model.outcome:
+        _validate_archive(arrays, meta, model.config)
     np.savez_compressed(path, **arrays)
 
 
@@ -214,9 +249,9 @@ def load_multi_npz(path: str | Path) -> LongBetMulti:
         )
 
     format_version = meta.get("format_version", 1)
-    if format_version not in (1, 2):
+    if format_version not in (1, 2, 3):
         raise ValueError(
-            f"Unsupported multi format_version {format_version}; expected 1 or 2."
+            f"Unsupported multi format_version {format_version}; expected 1, 2, or 3."
         )
 
     config = LongBetConfig.from_dict(json.loads(str(data["_config_json"])))
@@ -234,6 +269,8 @@ def load_multi_npz(path: str | Path) -> LongBetMulti:
             mu_trace=_rebuild_trace(data, f"outcome_{m}_mu", has_chains),
             nu_trace=_rebuild_trace(data, f"outcome_{m}_nu", has_chains),
             **{k: jnp.asarray(data[f"outcome_{m}_{k}"]) for k in _PARAM_KEYS},
+            cutpoints=(jnp.asarray(data[f"outcome_{m}_cutpoints"])
+                       if meta["internal_outcomes"][m] == "ordinal" else None),
         )
         child_traces.append(tr)
 
@@ -249,6 +286,8 @@ def load_multi_npz(path: str | Path) -> LongBetMulti:
     model.design_ = design
     model.outcome_names = tuple(meta["outcome_names"])
     model.outcome = tuple(meta["user_outcomes"])
+    model.num_categories = tuple(meta.get("num_categories", [None]*M))
+    model.internal_num_categories = tuple(meta.get("internal_num_categories", [None]*M))
     model.order = tuple(meta["order"])
     model.inverse_order = tuple(meta["inverse_order"])
     model.meany = tuple(meta["meany"])
@@ -272,7 +311,8 @@ def load_multi_npz(path: str | Path) -> LongBetMulti:
     for u in range(M):
         internal_idx = model.inverse_order[u]
         child_otype = model.outcome[u]
-        child_cfg = dataclasses.replace(config, outcome=child_otype, num_shared_trees=0)
+        child_cfg = dataclasses.replace(config, outcome=child_otype, num_shared_trees=0,
+                                         num_categories=model.num_categories[u])
 
         child_model = LongBet(child_cfg)
         child_model.multi_origin = model._child_origin(u)
