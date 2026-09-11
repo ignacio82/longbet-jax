@@ -52,8 +52,9 @@ def test_ordinal_seeded_validation(seed,intercepts):
     mode = "intercepts_missing" if intercepts else "base"
     root = ROOT / "benchmarks" / "ordinal_results"
     out = root / f"{mode}_{seed}"
-    if not (out / "metrics.json").exists():
-        validation.run_validation(seed,random_intercept=intercepts,output_root=root)
+    required = ("metrics.json", "settings.json", "posterior.npz", "dgp.npz")
+    if not all((out / f).exists() for f in required):
+        validation.run_validation(seed, random_intercept=intercepts, output_root=root)
     settings = json.loads((out / "settings.json").read_text())
     metrics = json.loads((out / "metrics.json").read_text())
     assert settings["config"] == validation.benchmark_config(seed,intercepts).to_dict()
