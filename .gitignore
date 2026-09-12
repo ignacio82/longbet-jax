@@ -1,12 +1,26 @@
+# Byte-compiled / optimized / virtual environments
 __pycache__/
 *.py[cod]
+*$py.class
 .venv/
 .pytest_cache/
+
+# Distribution / packaging
 *.egg-info/
 dist/
 build/
+
+# Binary data & raw posterior traces
+*.npz
+*.npy
+
+# R build & environment
 .Rproj.user/
 ..Rcheck/
 *.tar.gz
+.Rhistory
+.RData
+
+# Benchmark scratch & logs
 benchmarks/ordinal_results/.tmp/
 benchmarks/ordinal_results/logs/

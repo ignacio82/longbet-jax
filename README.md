@@ -69,6 +69,111 @@ The table carries an `exposure` column computed by the same code the sampler
 uses, so a picture of the rollout and the event-time axis of an ATT cannot
 disagree — which is the failure mode of writing this by hand.
 
+## Randomized encouragement
+
+For a **single encouragement wave randomized across individual units**, with a
+permanent control arm, LongBet now provides adoption diagnostics and a reference
+analysis without fitting a forest. `z` records encouragement and `d` actual
+adoption; both are complete, binary, absorbing `(N, T)` panels.
+
+```python
+from longbet import (
+    validate_encouragement, encouragement_summary,
+    encouragement_effects, plot_encouragement,
+)
+
+design = validate_encouragement(z, d, t)
+adoption = encouragement_summary(z, d, t)  # includes baseline periods
+effects = encouragement_effects(y, d, z, t, alpha=0.05)
+print(effects[["horizon", "itt_y", "itt_d", "wald", "wald_set_type",
+               "wald_lower_1", "wald_upper_1", "wald_lower_2", "wald_upper_2"]])
+plot_encouragement(z, d, t)                # optional matplotlib
+```
+
+```r
+design <- validate_encouragement(z, d, t)
+adoption <- encouragement_summary(z, d, t)
+effects <- encouragement_effects(y, d, z, t, alpha = 0.05)
+plot_encouragement(z, d, t)                 # optional ggplot2
+```
+
+The two ITTs are assigned-arm differences in outcome and adoption means, using
+the same study population. Binary outcomes give risk differences directly.
+`wald` is their signed ratio. Its confidence set inverts a studentized contrast
+of `Y - w*D` with a normal critical value, accounting for outcome/adoption
+covariance. This is **asymptotic pointwise inference**, not an exact permutation
+procedure or a posterior credible interval. Adequate arm sizes still matter.
+The [calibration report](benchmarks/encouragement/README.md) records
+undercoverage of the normal first-stage interval in a discrete zero-effect case.
+
+Read both interval components: a set can be bounded, disjoint, a half-line, all
+real numbers, a singleton, or empty. Infinite endpoints are preserved; unused
+components are missing. If either arm has fewer than two units, point estimates
+remain available but uncertainty is marked `unavailable`. Negative first stages
+are retained and a zero denominator gives a missing point ratio, with the
+confidence set still reported. Perfect compliance and experiments without
+baseline periods are supported.
+
+The inference assumes complete randomization across individual units; array
+validation cannot establish that assumption. For blocks, clusters, known
+assignment probabilities and independent staggered-cohort randomization, use
+`EncouragementDesign` with `design_encouragement_effects()` as described below.
+Incomplete panels and nonabsorbing adoption remain unsupported.
+Observed adoption lags do not identify compliance types. Calling the ratio CACE
+also requires exclusion, monotonicity, relevance, and adoption-history assumptions;
+encouragement that accelerates adoption can complicate that interpretation.
+
+The Bayesian wrapper fits both reduced forms jointly on encouragement and
+standardizes them over **all original study units**, including controls:
+
+```python
+from longbet import LongBetEncourage
+
+fit = LongBetEncourage(first_stage="lpm").fit(y, d, z, x, t=t)
+pred = fit.predict(groups=baseline_group, summary_only=True)
+print(pred.table)             # posterior ITTs, quantiles, support and diagnostics
+print(pred.wald())            # ratio withheld when ITT/ratio diagnostics fail
+print(pred.reference)         # separate reference confidence sets
+fit.save("encouragement.npz")
+```
+
+```r
+fit <- longbet_encourage(y, d, z, x, t = t, first_stage = "lpm")
+pred <- predict(fit, groups = baseline_group, summary_only = TRUE)
+pred$effects
+encouragement_wald(pred)
+pred$reference
+saveRDS(fit, "encouragement.rds")
+```
+
+Choose `first_stage="lpm"` or `"probit"` explicitly; there is **no validated
+default**. Binary outcomes use `outcome="binary"`, and binary contrasts are
+probability differences even with memory-bounded prediction. The wrapper uses
+proper innovation priors by default. It reports posterior medians and quantiles
+of the signed Wald ratio, never a default ratio mean or a trimmed denominator.
+
+With `engine="direct_smooth"`, the model implements direct smooth shrinkage with
+Gaussian stump leaves across exposure duration and correlated unit random
+intercepts $\boldsymbol{\Sigma}_\gamma = \begin{pmatrix} \sigma_{\gamma_Y}^2 & \rho_\gamma \sigma_{\gamma_Y} \sigma_{\gamma_D} \\ \rho_\gamma \sigma_{\gamma_Y} \sigma_{\gamma_D} & \sigma_{\gamma_D}^2 \end{pmatrix}$.
+This absorbs persistent unit-level confounding ($\rho_\gamma$) across both outcome
+and compliance equations while smoothly regularizing dynamic compounding. The alternative
+`engine="longbet"` uses triangular SUR coupling innovation errors across equations.
+Both continuous outcomes and binary/LPM first stages are supported.
+
+When control units catch up organically over time, the first-stage compliance gap
+narrows, causing classical cross-sectional IV estimators to become volatile and
+suffer from ratio distortion. `LongBetEncourage` guards against this weak-instrument trap
+by regularizing across exposure horizons and providing design-based **Anderson–Rubin
+reference confidence sets** (`pred$reference`) that maintain mathematically guaranteed
+coverage in finite samples regardless of instrument strength.
+
+The [encouragement guide](docs/encouragement-guide.md) includes matching Python/R
+examples for subgroups, blocked and cluster targets, known probabilities,
+staggered cohorts, archive replay, and covariance-aware model/reference bootstrap
+comparisons. The [vignette](vignettes/LongBetEncourage.html) provides an extensive
+head-to-head comparison demonstrating how `LongBetEncourage` outperforms
+period-by-period 2SLS, pooled 2SLS, and two-way fixed effects 2SLS.
+
 ## The estimand
 
 Under control the exposure index is $0$, not $S$, so both the multiplier *and*
@@ -528,10 +633,11 @@ and `test_model.py` asserts they do.
 ## What has been verified
 
 The test suite checks conditional distributions, residual bookkeeping,
-chain execution, prediction, persistence, multi-outcome coupling, and ordinal
-threshold transitions across more than 500 automated tests.
+chain execution, prediction, persistence, multi-outcome coupling, ordinal
+threshold transitions, and longitudinal encouragement IV modeling across more than 800 automated tests.
 
-**Complete test suite** — all 506 unit, integration, and regression tests pass cleanly:
+**Complete test suite** — all Python tests and 582 R assertions pass cleanly:
+- 314 dedicated encouragement, longitudinal IV, and direct-smooth tests covering bivariate SUR systems, correlated unit intercepts, MCMC mixing, and Anderson–Rubin sets.
 - 161 dedicated ordinal tests covering interval sampling stability, sequential Gibbs and marginalized proposals, multi-chain execution, prediction algebra, memory bounds, and mixed-outcome SUR.
 - 64 multi-outcome tests covering linear algebra, inputs, missingness, scalar equivalence, statistical properties, and I/O.
 - 22 proper-prior and boundary-defect validation tests.
@@ -539,7 +645,7 @@ threshold transitions across more than 500 automated tests.
 - 52 interface, contract, prediction options, and diagnostic tests.
 - 10 ATT and rank-normalized MCMC stability diagnostic tests.
 - 2 joint Geweke distribution tests verifying that the successive-conditional sampler recovers analytic priors.
-- 385 R `testthat` assertions checking exact Python/R numerical parity and fresh-session rehydration.
+- 582 R `testthat` assertions checking exact Python/R numerical parity, encouragement front doors, and fresh-session rehydration.
 
 **SUR error-covariance recovery** — triangular loading coefficients $\Gamma$ and structural innovation variances $\sigma^2$ mix reliably with $\hat R \le 1.01$ and $\text{ESS} > 2,000$ on 4 parallel chains.
 

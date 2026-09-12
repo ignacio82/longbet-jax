@@ -27,7 +27,7 @@
 #
 # Adding a configuration option without touching this file fails the Python
 # test; exposing it in R with a different default fails the R test.
-version: "2.2.0"
+version: "2.4.0"
 
 # Config fields that are deliberately not part of the user-facing contract.
 internal:
@@ -541,3 +541,232 @@ ordinal_api:
     New-unit probabilities use zero intercepts when unit counts differ, not a
     marginal random-unit distribution. Forest-evaluation caching intentionally
     retains full latent forest buffers and is disabled by default.
+
+# These basic utilities have no sampler configuration and no posterior archive.
+encouragement_api:
+  design: single_wave_complete
+  randomization: >-
+    Individual-unit complete randomization with a single encouragement wave and
+    permanent control arm. Equal-probability independent Bernoulli assignment is
+    supported conditional on arm counts. Array validation does not verify the
+    randomization, exclusion, monotonicity, or adoption-history assumptions.
+  unsupported: >-
+    Blocked, unequal-probability, cluster-randomized, staggered or re-randomized
+    encouragement; nonabsorbing adoption; missing panels. Perfect compliance,
+    first-period encouragement, and negative sample first stages are accepted.
+  inputs:
+    z: Complete binary absorbing (N,T) encouragement panel.
+    d: Complete binary absorbing (N,T) actual adoption panel on identical units.
+    "y": Complete finite numeric (N,T) outcome panel; binary outcomes give risk differences.
+    t: Strictly increasing calendar time with whole-unit gaps; defaults to 1..T.
+  functions:
+    validate_encouragement:
+      required: [z, d]
+      defaults: {t: null}
+      returns: metadata dictionary in Python, list in R
+    encouragement_summary:
+      required: [z, d]
+      defaults: {t: null, alpha: 0.05}
+      returns: table with one row per observed calendar period, including baseline
+    encouragement_effects:
+      required: ["y", d, z]
+      defaults: {t: null, alpha: 0.05}
+      returns: table with one row per observed post-encouragement calendar period
+    plot_encouragement:
+      required: [z, d]
+      defaults: {t: null}
+      python_only_defaults: {ax: null}
+      returns: matplotlib Axes in Python, ggplot in R
+  metadata_fields:
+    - design
+    - n_units
+    - n_periods
+    - n_encouraged
+    - n_control
+    - encouragement_period
+    - encouragement_index
+    - has_pre_periods
+    - perfect_compliance
+  summary_columns:
+    - period
+    - period_index
+    - horizon
+    - post_encouragement
+    - n_encouraged
+    - n_control
+    - takeup_encouraged
+    - takeup_control
+    - first_stage
+    - first_stage_se
+    - first_stage_lower
+    - first_stage_upper
+    - first_stage_includes_zero
+    - negative_first_stage
+    - n_encouraged_adopters
+    - share_immediate
+    - median_observed_lag
+    - share_pre_encouragement_adoption
+  effects_columns:
+    - period
+    - period_index
+    - horizon
+    - post_encouragement
+    - n_encouraged
+    - n_control
+    - itt_y_d_cov
+    - wald
+    - inference
+    - itt_y
+    - itt_y_se
+    - itt_y_lower
+    - itt_y_upper
+    - itt_d
+    - itt_d_se
+    - itt_d_lower
+    - itt_d_upper
+    - wald_set_type
+    - wald_reason
+    - wald_lower_1
+    - wald_upper_1
+    - wald_lower_2
+    - wald_upper_2
+  inference:
+    method: normal_ar
+    covariance: sum of joint within-arm sample covariance matrices divided by arm sizes
+    set: >-
+      Analytic inversion of the studentized Y-w*D assigned-arm contrast, using a
+      normal critical value. Asymptotic pointwise confidence sets, not exact
+      permutation intervals, simultaneous intervals, or Bayesian credible intervals.
+    set_types: [bounded, disjoint, half_line, all_real, singleton, empty, unavailable]
+    components: >-
+      Up to two closed intervals in wald_lower_1/wald_upper_1 and
+      wald_lower_2/wald_upper_2. Infinite endpoints preserved; unused components NaN.
+    insufficient_arm_size: >-
+      With fewer than two units in either arm, retain point estimates but return
+      NaN variance/bounds, wald_set_type=unavailable and
+      wald_reason=insufficient_arm_size.
+    interpretation: >-
+      Wald ratio, not automatically CACE. No absolute first-stage cutoff or
+      automatic monotonicity/timing certification. Lag summaries are descriptive.
+
+encouragement_model_api:
+  python_class: LongBetEncourage
+  r_function: longbet_encourage
+  inference_version: encouragement_reduced_form_v1
+  archive_version: 1
+  constructor:
+    required: [first_stage]
+    defaults: {config: null, outcome: continuous}
+    sampler_overrides: config_kwargs
+    first_stage_choices: [lpm, probit]
+    wrapper_default_priors: {sigma_prior_a: 2.0, sigma_prior_b: 1.0}
+  r_fit:
+    required: ["y", d, z, x, first_stage]
+    defaults: {t: null, x_trt: null, outcome: continuous, config: {}, verbose: false, engine: longbet, direct_config: {}}
+  r_predict:
+    required: [object]
+    defaults: {summary_only: true, groups: null, block_size: null, standardization: conditional, alpha: 0.05, min_ess: 400, max_rhat: 1.01, practical_threshold: null}
+    variadic: "..."
+  fit:
+    required: ["y", d, z, x]
+    defaults: {t: null, x_trt: null, key: null}
+  predict:
+    defaults: {summary_only: true, groups: null, block_size: null, standardization: conditional, alpha: 0.05}
+  diagnostics_defaults: {min_ess: 400, max_rhat: 1.01}
+  posterior_methods:
+    effects: {min_ess: 400, max_rhat: 1.01}
+    stability: {min_ess: 400, max_rhat: 1.01}
+    wald: {require_convergence: true, min_ess: 400, max_rhat: 1.01}
+    first_stage: {practical_threshold: null, min_ess: 400, max_rhat: 1.01}
+    itt_covariance: {}
+    comparison: {}
+  bootstrap_comparison:
+    defaults: {replicates: 200, groups: null, random_seed: 0, alpha: 0.05, min_ess: 400, max_rhat: 1.01, callback: null}
+    sampling_unit: entire longitudinal unit record within assigned arm and baseline subgroup
+    covariance: paired refits of model and reference on the identical bootstrap sample
+    flag: >-
+      Pointwise normal comparison of ITTs only. Withheld when any fit fails
+      diagnostics, any estimate is unavailable, or fewer than 100 replications
+      are requested. Not exact randomization inference or a test of IV assumptions.
+  target: all original study units with common equal weights in both equations
+  groups: >-
+    Fixed baseline labels; include overall all and each subgroup. Conditional
+    subgroup arm-mean reference differs from the fixed-denominator HT estimator
+    in encouragement_design_api. Missing-arm groups retain model predictions
+    flagged as extrapolation, with unavailable reference contrasts.
+  standardization:
+    conditional: natural-scale contrasts holding each fitted unit-intercept draw fixed
+    population: >-
+      Integrates new normal unit intercepts for binary outcomes, using
+      Phi(eta/sqrt(1+sigma_gamma_squared)); different target from the finite-unit
+      reference, so model/reference comparisons are unavailable.
+  returns:
+    draws: dictionary of itt_y, itt_d, wald; axes (group, horizon, chain, retained draw)
+    table: tidy posterior means for ITTs, medians/quantiles, diagnostics and support
+    reference: separate frequentist pointwise normal_ar confidence sets
+    itt_covariance: empirical joint posterior covariance across groups, horizons and both ITTs
+    cell_summaries: natural-scale cell summaries available with summary_only true
+    cell_draws: natural-scale (N,T,chains*draws) arrays only when summary_only false
+  ratio_rules: >-
+    Preserve signed and near-zero denominators, never trim draws. Exactly-zero
+    denominators yield NaN and withhold the ratio interval for that row. Ratio
+    means and mean MCSE are absent. Diagnose endpoint quantiles, bulk/tail ESS,
+    rank R-hat; wald() withholds ratios when either ITT or ratio diagnostics fail.
+  calibration_status: not_established
+  covariance_limit: >-
+    SUR couples eligible innovations; unit-intercept priors remain independent
+    across equations. With binary Y and probit D, both innovation-loading rows
+    are zero: metadata records independent_binary regardless of config.sur.
+    Without opt-in shared treatment partitions, these equation posteriors are
+    independent. Shared partitions do not add binary innovation correlation.
+  archive: >-
+    Versioned pickle-free NPZ contains nested joint model, original y/d/z/x/t
+    and optional baseline x_trt, design metadata and input digests. R stores raw
+    archive bytes and plain results, retaining no required live Python handles.
+  scope: >-
+    Complete individual single-wave randomization, absorbing adoption, complete
+    panels and baseline covariates. Generalized designs below have reference
+    inference only. No structural treatment-clock model or automatic CACE label.
+
+encouragement_design_api:
+  python_class: EncouragementDesign
+  r_constructor: encouragement_design
+  defaults:
+    assignment: complete
+    blocks: null
+    clusters: null
+    target: unit
+    probabilities: null
+    block_weights: null
+    cohort_weights: null
+    control: not_yet
+  effects_function: design_encouragement_effects
+  required: ["y", d, z]
+  effects_defaults: {t: null, design: null, groups: null, alpha: 0.05}
+  assignment_choices: [complete, bernoulli, staggered]
+  targets: [unit, cluster]
+  estimator: horvitz_thompson
+  covariance:
+    complete: blockwise Neyman on scaled whole-cluster totals
+    bernoulli: independent-assignment uncentered PSD covariance bound
+    staggered: independent categorical cohort assignment; uncentered PSD bound retains reused controls
+  probabilities: >-
+    Known scalar or vector in participant or first-appearance cluster order.
+    Constant within clusters. Staggered uses a mapping from zero-based observed
+    cohort indices and optional never to probabilities summing to one per unit.
+  weights: >-
+    Fixed equal-unit or equal-cluster target, optional explicit block weights,
+    required positive staggered cohort weights. No renormalization after a
+    cohort horizon or eligible controls disappear. Subgroups use fixed target
+    denominators, not realized subgroup arm counts.
+  returns:
+    table: cohort/calendar and fixed-weight horizon contrasts with support and reference confidence sets
+    covariance: full joint matrix indexed by (contrast_id, quantity) for itt_y and itt_d
+    metadata: serializable design, weights, probabilities, assumptions and original label mappings
+  limitations: >-
+    Pointwise asymptotic normal confidence sets; no finite-sample exact or
+    simultaneous guarantees. Uncentered covariance can be loose and depend on
+    outcome location. Staggered assumes independent cohort assignment and no
+    anticipation; fixed cohort quotas, sequential rerandomization, missing
+    panels and nonabsorbing adoption are unsupported. No model extrapolation.
+

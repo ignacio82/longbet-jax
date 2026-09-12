@@ -20,6 +20,37 @@ A JAX implementation of LongBet, built on ``bartz``. See :class:`LongBet`.
 from longbet._config import LongBetConfig
 from longbet._design import Design
 from longbet._diagnostics import StabilityResult, att_stability, compute_ess, compute_rhat
+from longbet._encourage import (
+    encouragement_effects,
+    encouragement_summary,
+    plot_encouragement,
+    validate_encouragement,
+)
+from longbet._encourage_model import (
+    EncouragementComparison,
+    EncouragementPrediction,
+    LongBetEncourage,
+)
+from longbet._encourage_design import (
+    EncouragementDesign,
+    EncouragementDesignResult,
+    design_encouragement_effects,
+)
+from longbet._direct_smooth import (
+    DirectSmoothConfig,
+    LongBetDirectSmooth,
+)
+from longbet._hazard_adoption import (
+    HazardAdoptionForest,
+    HazardAdoptionResult,
+    HazardConfig,
+    hazard_adoption_effects,
+)
+from longbet._coupled_hazard_iv import (
+    CoupledHazardConfig,
+    CoupledHazardIV,
+    CoupledHazardResult,
+)
 from longbet._io import load_npz, save_npz
 from longbet._multi_io import load_multi_npz, save_multi_npz
 from longbet._multi_model import (
@@ -58,9 +89,22 @@ __version__ = "0.1.0"
 __all__ = [
     "ROLLOUT_COLORS",
     "BlockAccumulator",
+    "CoupledHazardConfig",
+    "CoupledHazardIV",
+    "CoupledHazardResult",
     "Design",
+    "DirectSmoothConfig",
+    "EncouragementComparison",
+    "EncouragementDesign",
+    "EncouragementDesignResult",
+    "EncouragementPrediction",
+    "HazardAdoptionForest",
+    "HazardAdoptionResult",
+    "HazardConfig",
     "LongBet",
     "LongBetConfig",
+    "LongBetDirectSmooth",
+    "LongBetEncourage",
     "LongBetMulti",
     "LongBetMultiPrediction",
     "LongBetPrediction",
@@ -72,15 +116,20 @@ __all__ = [
     "compute_ess",
     "compute_rhat",
     "derive_exposure",
+    "design_encouragement_effects",
     "effect_draws",
     "effect_draws_from_arrays",
+    "encouragement_effects",
+    "encouragement_summary",
     "get_att",
     "get_catt",
+    "hazard_adoption_effects",
     "joint_prob",
     "load_multi_npz",
     "load_npz",
     "outcome_correlation",
     "plot_rollout",
+    "plot_encouragement",
     "resolve_device",
     "reduce_joint_masks",
     "rollout_summary",
@@ -88,5 +137,6 @@ __all__ = [
     "save_npz",
     "streaming_summary",
     "summarize_draws",
+    "validate_encouragement",
     "__version__",
 ]
