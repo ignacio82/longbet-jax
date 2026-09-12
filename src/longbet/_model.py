@@ -297,10 +297,12 @@ class LongBetPrediction:
         return result
 
     def att_expected_score(self, weights=None, alpha=0.05):
-        """ATT on a user-defined score; default rank scores assume equal spacing.
+        """ATT on a user-defined score; defaults to numeric category ranks.
 
         Weights need not increase: indicator weights report exceedance or
         single-category effects. Scores are formed within each posterior draw.
+        Rank spacing is a reporting convention, not a measurement assumption
+        imposed by the ordinal likelihood.
         """
         self._require_ordinal()
         weights = np.asarray(self.categories if weights is None else weights)

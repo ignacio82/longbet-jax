@@ -17,7 +17,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from scipy import stats
+from scipy import integrate, stats
 
 from longbet import LongBetConfig
 from longbet._ordinal import (category_probabilities, prepare_ordinal,
@@ -196,3 +196,64 @@ def test_sample_cutpoints_marginalized_contract():
     cp_alt = jax.jit(sample_cutpoints_marginalized)(key, cp_init, labels_alt, mean, 1.0, mask, 5.0)
     np.testing.assert_array_equal(cp_new, cp_alt)
 
+
+def _marginalized_chain_draws(labels, mean, sd, mask, initial, prior_scale):
+    """Independent chains for fixed-surface threshold distribution checks."""
+    @jax.jit
+    def run(key, start):
+        def step(cuts, subkey):
+            cuts = sample_cutpoints_marginalized(
+                subkey, cuts, labels, mean, sd, mask, prior_scale)
+            return cuts, cuts
+        return jax.lax.scan(step, start, jax.random.split(key, 14000))[1]
+    keys = jax.random.split(jax.random.key(20260912), 4)
+    starts = jnp.asarray(initial)[None, :] * jnp.array([.4, .8, 1.5, 2.5])[:, None]
+    samples = np.asarray(jax.vmap(run)(keys, starts))[:, 2000:]
+    assert np.isfinite(samples).all()
+    return samples.reshape(-1, len(initial)).astype(np.float64)
+
+
+@pytest.mark.parametrize("conditional_scale", [False, True])
+def test_marginalized_threshold_posterior_matches_quadrature(conditional_scale):
+    # K=3 has one free threshold, so its posterior can be integrated directly
+    # in threshold coordinates, independently of the sampler's log-gap target.
+    labels = np.array([0, 1, 1, 2, 2, 2, 999])
+    mean = np.array([-.3, .1, .6, 1., 1.5, 2., np.nan])
+    sd = np.array([.4, .7, .5, .9, .6, .8, np.nan]) if conditional_scale else np.ones(7)
+    mask = np.arange(7) < 6
+    prior_scale = 1.7
+
+    def density(theta):
+        bounds = np.array([-np.inf, 0., theta, np.inf])
+        y, m, s = labels[mask], mean[mask], sd[mask]
+        probabilities = stats.norm.cdf((bounds[y + 1] - m) / s) - stats.norm.cdf((bounds[y] - m) / s)
+        return np.prod(probabilities) * stats.halfnorm.pdf(theta, scale=prior_scale)
+
+    mass = integrate.quad(density, 0, np.inf, epsabs=1e-12)[0]
+    draws = _marginalized_chain_draws(
+        jnp.asarray(labels), jnp.asarray(mean), jnp.asarray(sd), jnp.asarray(mask),
+        [1.], prior_scale)[:, 0]
+    assert (draws > 0).all()
+    # Conservative fixed tolerances allow serial dependence; IID KS critical
+    # values are inappropriate for MCMC samples. Both moments and CDFs are
+    # checked, so an omitted Jacobian or wrong prior cannot pass on shape alone.
+    expected_mean = integrate.quad(lambda t: t * density(t), 0, np.inf, epsabs=1e-12)[0] / mass
+    assert draws.mean() == pytest.approx(expected_mean, abs=.035)
+    for theta in [.5, 1., 1.5, 2.]:
+        expected_cdf = integrate.quad(density, 0, theta, epsabs=1e-12)[0] / mass
+        assert np.mean(draws <= theta) == pytest.approx(expected_cdf, abs=.025)
+
+
+def test_marginalized_empty_categories_recover_ordered_normal_prior():
+    # Only category zero is observed, whose probability does not depend on the
+    # free thresholds. K=4 must therefore recover two sorted half-normal draws.
+    scale = 2.
+    draws = _marginalized_chain_draws(
+        jnp.array([0, 999]), jnp.array([-.2, jnp.nan]),
+        jnp.array([1., jnp.nan]), jnp.array([True, False]), [1., 2.], scale)
+    assert (draws[:, 0] > 0).all()
+    assert (draws[:, 1] > draws[:, 0]).all()
+    median = stats.halfnorm.ppf(.5, scale=scale)
+    assert np.mean(draws[:, 0] <= median) == pytest.approx(.75, abs=.03)
+    assert np.mean(draws[:, 1] <= median) == pytest.approx(.25, abs=.03)
+    assert np.mean(np.sum((draws / scale)**2, axis=1)) == pytest.approx(2., abs=.12)

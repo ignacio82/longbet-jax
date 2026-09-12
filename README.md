@@ -517,9 +517,11 @@ example, with C chains and D total draws, category k can be diagnosed using
 `att_stability(pred.att_prob_full[:, k, :].reshape(S, C, D//C).transpose(1, 2, 0))`.
 Free threshold draws are `pred.cutpoints_samples (D,K-2)` in chain-major order.
 The [ordinal validation report](benchmarks/ordinal_validation_report.md)
-records the specified repeated-panel experiment, confirming cutpoint convergence
-($\hat R < 1.02$, $\text{ESS} > 340$) and benchmark coverage across independent
-seeded panels.
+records the available repeated-panel results and their limitations. The checked-in
+report contains only two of ten prescribed base datasets, with failed mixing
+goals, and predates the marginalized threshold transition. It does not establish
+convergence or calibrated repeated-sample coverage for the current sampler.
+Check diagnostics for the thresholds and the category/score effects in each fit.
 
 Summary prediction transforms all draws within each cell block before
 reducing. Its working byte budget accounts for float64 CDF calculations and
@@ -620,9 +622,12 @@ Two moves traverse that ridge, both on by default:
   map $(\beta, \ell) \mapsto (c\beta, \ell/c)$, accounting for both priors and
   the Jacobian.
 
-Setting `split_time_trt = FALSE` removes the $c(S)$ freedom entirely by denying
-the treatment forest the exposure index, forcing all exposure-time shape into
-$\beta$. That is the variant for which the projection means something specific.
+Setting `split_time_trt = FALSE` disables direct exposure-index splits in the
+treatment forest, giving $\nu(X,t)$ and placing explicit dependence on $S$ in
+$\beta$. Calendar time remains available to the treatment forest, including
+interactions with covariates, so it can still modify effects along an account's
+observed history. This changes the induced prior and reduces one source of
+redundancy; it does not guarantee convergence or make the forest covariate-only.
 
 Treat any projection past the fitted horizon as a statement about the prior on
 the $\beta$/$\nu$ split, not a reading of the data. Interval widths grow there,
@@ -636,9 +641,11 @@ The test suite checks conditional distributions, residual bookkeeping,
 chain execution, prediction, persistence, multi-outcome coupling, ordinal
 threshold transitions, and longitudinal encouragement IV modeling across more than 800 automated tests.
 
-**Complete test suite** — all Python tests and 582 R assertions pass cleanly:
+Test coverage includes the following groups (counts are a snapshot, not a
+current test-run result; the ordinal statistical benchmark gates remain
+separate from software checks):
 - 314 dedicated encouragement, longitudinal IV, and direct-smooth tests covering bivariate SUR systems, correlated unit intercepts, MCMC mixing, and Anderson–Rubin sets.
-- 161 dedicated ordinal tests covering interval sampling stability, sequential Gibbs and marginalized proposals, multi-chain execution, prediction algebra, memory bounds, and mixed-outcome SUR.
+- Dedicated ordinal tests covering interval sampling stability, sequential Gibbs and marginalized proposals, multi-chain execution, prediction algebra, memory bounds, and mixed-outcome SUR. Fixed-surface marginalized-threshold checks compare its posterior with independent numerical integration (including nonunit conditional scales) and the ordered-normal prior for empty categories.
 - 64 multi-outcome tests covering linear algebra, inputs, missingness, scalar equivalence, statistical properties, and I/O.
 - 22 proper-prior and boundary-defect validation tests.
 - 17 full triangular SUR coupling and covariance-recovery tests.
