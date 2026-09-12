@@ -52,6 +52,7 @@ class DirectSmoothConfig:
     correlated_intercepts: bool = False
     intercept_df: float = 7.0
     intercept_scale: float = 4.0
+    kernel: str = "matern32"
 
     def __post_init__(self):
         if not isinstance(self.joint_baseline_intercept, bool):
@@ -62,6 +63,8 @@ class DirectSmoothConfig:
             raise ValueError("joint_effect_leaves requires joint_baseline_intercept.")
         if not isinstance(self.correlated_intercepts, bool):
             raise ValueError("correlated_intercepts must be boolean.")
+        if self.kernel not in ("rbf", "matern32", "matern12"):
+            raise ValueError(f"Unknown kernel: {self.kernel}")
         for name in ("baseline_trees", "effect_trees", "cutpoints"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -464,12 +467,14 @@ class LongBetDirectSmooth:
             sd=self.config.baseline_sd / np.sqrt(self.config.baseline_trees),
             length_scale=self.config.length_scale,
             nugget=self.config.nugget,
+            kernel=self.config.kernel,
         )
         effect_cov = time_covariance(
             times[start:],
             sd=self.config.effect_sd / np.sqrt(self.config.effect_trees),
             length_scale=self.config.length_scale,
             nugget=self.config.nugget,
+            kernel=self.config.kernel,
         )
         centered = assignment - np.mean(assignment)
         baseline_design = ForestDesign.build(space, np.ones(n), base_cov)
@@ -558,15 +563,43 @@ class LongBetDirectSmooth:
         *,
         groups: Any = None,
         alpha: float = 0.05,
+        target: str = "sample",
     ) -> EncouragementPrediction:
-        """Create EncouragementPrediction object compatible with standard evaluation."""
+        """Create EncouragementPrediction object compatible with standard evaluation.
+
+        Parameters
+        ----------
+        groups : unsupported for direct_smooth (must be None)
+        alpha : significance level (default 0.05)
+        target : 'sample' for Sample Average Treatment Effect (SATE) with
+                 finite-sample counterfactual imputation variance, or 'population'
+                 for superpopulation conditional mean function PATE.
+        """
         if not self.fitted_:
             raise RuntimeError("LongBetDirectSmooth must be fitted before predict().")
         if groups is not None:
             raise ValueError("direct_smooth stores only the all-unit target; groups are unsupported.")
+        if target not in ("sample", "population"):
+            raise ValueError("target must be 'sample' or 'population'.")
         _critical(alpha)
-        dy = self.draws["itt_y"]  # (chains, draws, h)
-        dd = self.draws["itt_d"]
+        dy = self.draws["itt_y"].copy()  # (chains, draws, h)
+        dd = self.draws["itt_d"].copy()
+
+        if target == "sample":
+            # Finite-sample SATE counterfactual imputation:
+            # Impute the unobserved potential outcomes for each unit and draw
+            # The missing counterfactual contributes residual variance sigma^2 / N to the sample average
+            n_units = len(self._data["z"])
+            scale_y = float(self._data["y"].std())
+            scale_d = float(self._data["d"].std())
+            sig_y = np.sqrt(self.draws["sigma2"][:, :, 0]) * scale_y
+            sig_d = np.sqrt(self.draws["sigma2"][:, :, 1]) * scale_d
+            rng_sate = np.random.default_rng(int(self.metadata["sampler"]["seed"]) + 999)
+            noise_y = rng_sate.normal(size=dy.shape) * (sig_y[..., None] / np.sqrt(n_units))
+            noise_d = rng_sate.normal(size=dd.shape) * (sig_d[..., None] / np.sqrt(n_units))
+            dy += noise_y
+            dd += noise_d
+
         chains, draws, h = dy.shape
         # Format axes to (group, horizon, chain, draw)
         dy_formatted = dy.transpose(2, 0, 1)[None, ...]  # (1, h, chains, draws)
