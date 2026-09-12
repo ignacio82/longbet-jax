@@ -710,22 +710,3 @@ encouragement_design_api:
     outcome location. Staggered assumes independent cohort assignment and no
     anticipation; fixed cohort quotas, sequential rerandomization, missing
     panels and nonabsorbing adoption are unsupported. No model extrapolation.
-
-# Prediction-assisted IV front door. This is a separate experimental estimator.
-crossfit_iv_api:
-  function: longbet_iv
-  required: ["y", "d", "z"]
-  defaults:
-    x: null
-    t: null
-    learner_config: null
-    folds: 2
-    seed: 0
-    alpha: 0.05
-    design: complete_randomization
-  returns: [table, estimates, covariance, predictions, unit_scores, fold_ids, metadata]
-  covariance_order: horizon_then_response_y_d
-  inference: asymptotic_average_itt_moment
-  exact_randomization: false
-  posterior_causal_intervals: false
-  experimental: true
