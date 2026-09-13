@@ -417,14 +417,7 @@ design_encouragement_effects <- function(y, d, z, t = NULL, design = NULL,
 #'   `cace`, `cumulative_lift`, `breakeven_prob`, `decision`, `policy_value`,
 #'   `periods`, `horizons`, `cost`, `hurdle`, `budget`, `capacity`, and `alpha`.
 #' @export
-predict_conditional <- function(object, new_x = NULL, new_z = NULL, t = NULL,
-                                cost = NULL, hurdle = 0.50, alpha = 0.05,
-                                cace_stabilization = 0.02,
-                                monotonic_first_stage = TRUE,
-                                cace_shrinkage = "adaptive",
-                                shrinkage_lambda = 1.0,
-                                budget = NULL, capacity = NULL,
-                                ranking_metric = "expected_net_value", ...) {
+predict_conditional <- function(object, ...) {
   UseMethod("predict_conditional")
 }
 
@@ -633,7 +626,7 @@ strata_summary.longbet_conditional_pred <- function(object, horizon = NULL) {
   for (i in seq_len(nrow(sub))) {
     r <- sub[i, ]
     st <- gsub("_", "-", tools::toTitleCase(as.character(r$stratum)))
-    cat(sprintf("  • %-13s: %5.1f%% (95%% CI: [%.1f%%, %.1f%%])  —  ~%.1f units (95%% CI: [%.1f, %.1f])\n",
+    cat(sprintf("  - %-13s: %5.1f%% (95%% CI: [%.1f%%, %.1f%%])  --  ~%.1f units (95%% CI: [%.1f, %.1f])\n",
                 st, r$prob_mean * 100, r$prob_lower * 100, r$prob_upper * 100,
                 r$count_mean, r$count_lower, r$count_upper))
   }
