@@ -219,6 +219,11 @@ class HazardAdoptionForest:
         itt_stock = np.empty((chains, draws, h))
         itt_exposure = np.empty((chains, draws, h))
         xi_draws = np.empty((chains, draws), dtype=int)
+        unit_stock_itt = np.empty((chains, draws, n, h))
+
+        base_leaves_list = []
+        eff_leaves_list = []
+        xi_list = []
 
         # Precompute leaf variance
         base_leaf_var = (self.config.baseline_sd ** 2) / self.config.baseline_trees
@@ -289,9 +294,12 @@ class HazardAdoptionForest:
                 if it >= burnin:
                     save_idx = it - burnin
                     xi_draws[c, save_idx] = xi
+                    flat_idx = c * draws + save_idx
+                    base_leaves_list.append(base_leaves.copy())
+                    eff_leaves_list.append(eff_leaves.copy())
+                    xi_list.append(xi)
+
                     # Compute counterfactual hazards:
-                    # Under Z=1 (centered_z = 1 - p):
-                    # Under Z=0 (centered_z = -p):
                     p_mean = np.mean(assignment)
                     lambda_0 = np.zeros((n, periods))
                     lambda_1 = np.zeros((n, periods))
@@ -313,8 +321,11 @@ class HazardAdoptionForest:
                     exp_0 = np.cumsum(stock_0, axis=1)
                     exp_1 = np.cumsum(stock_1, axis=1)
 
+                    stock_diff = stock_1[:, start:] - stock_0[:, start:]
+                    unit_stock_itt[c, save_idx] = stock_diff
+
                     itt_h = np.mean(lambda_1[:, start:] - lambda_0[:, start:], axis=0)
-                    itt_s = np.mean(stock_1[:, start:] - stock_0[:, start:], axis=0)
+                    itt_s = np.mean(stock_diff, axis=0)
                     itt_e = np.mean(exp_1[:, start:] - exp_0[:, start:], axis=0)
 
                     itt_hazard[c, save_idx] = itt_h
@@ -325,8 +336,18 @@ class HazardAdoptionForest:
             hazard_itt=itt_hazard,
             stock_itt=itt_stock,
             exposure_itt=itt_exposure,
+            unit_stock_itt=unit_stock_itt,
             xi=xi_draws,
         )
+        self.base_rules = base_rules
+        self.eff_rules = eff_rules
+        self.space_features = space.feature
+        self.space_thresholds = space.threshold
+        self.p_mean = np.mean(assignment)
+        self._base_leaves_list = base_leaves_list
+        self._eff_leaves_list = eff_leaves_list
+        self._xi_list = xi_list
+
         self.metadata = dict(
             **panel.metadata(),
             config=asdict(self.config),
@@ -351,6 +372,76 @@ class HazardAdoptionForest:
         self.panel = panel
         self.fitted_ = True
         return self
+
+    def predict(self, x_new: Any = None) -> np.ndarray:
+        """Predict unit-level counterfactual stock adoption difference on units.
+
+        Returns array of shape (N, H, n_draws), where H = T - start.
+        Guarantees non-decreasing absorbing adoption trajectories over horizons.
+        """
+        if not self.fitted_:
+            raise RuntimeError("Model must be fitted before calling predict().")
+        if x_new is None:
+            c_cnt, d_cnt, n_u, h_u = self.draws["unit_stock_itt"].shape
+            # (chains, draws, n, h) -> (chains * draws, n, h) -> (n, h, chains * draws)
+            return self.draws["unit_stock_itt"].reshape(c_cnt * d_cnt, n_u, h_u).transpose(1, 2, 0)
+
+        x_new_np = np.asarray(x_new, dtype=float)
+        n_new = len(x_new_np)
+        start = self.panel.start
+        periods = self.panel.d.shape[1]
+        h = periods - start
+        total_draws = len(self._xi_list)
+
+        base_mask_new = np.empty((self.config.baseline_trees, 2, n_new), dtype=float)
+        for tr, rule_idx in enumerate(self.base_rules):
+            feat = self.space_features[rule_idx]
+            if feat == -1:
+                base_mask_new[tr, 0, :] = 1.0
+                base_mask_new[tr, 1, :] = 0.0
+            else:
+                is_left = (x_new_np[:, feat] <= self.space_thresholds[rule_idx]).astype(float)
+                base_mask_new[tr, 0, :] = is_left
+                base_mask_new[tr, 1, :] = 1.0 - is_left
+
+        eff_mask_new = np.empty((self.config.effect_trees, 2, n_new), dtype=float)
+        for tr, rule_idx in enumerate(self.eff_rules):
+            feat = self.space_features[rule_idx]
+            if feat == -1:
+                eff_mask_new[tr, 0, :] = 1.0
+                eff_mask_new[tr, 1, :] = 0.0
+            else:
+                is_left = (x_new_np[:, feat] <= self.space_thresholds[rule_idx]).astype(float)
+                eff_mask_new[tr, 0, :] = is_left
+                eff_mask_new[tr, 1, :] = 1.0 - is_left
+
+        p_mean = self.p_mean
+        base_leaves_arr = np.asarray(self._base_leaves_list)  # (D, J_b, 2, periods)
+        eff_leaves_arr = np.asarray(self._eff_leaves_list)    # (D, J_e, 2, h)
+        xi_arr = np.asarray(self._xi_list)[:, None, None]     # (D, 1, 1)
+
+        # Vectorized linear predictors over all draws and units
+        eta_base = np.einsum("djlt,jln->dnt", base_leaves_arr, base_mask_new)  # (D, N, periods)
+        eff_val = np.einsum("djlh,jln->dnh", eff_leaves_arr, eff_mask_new)     # (D, N, h)
+
+        lambda_0 = np.empty((total_draws, n_new, periods), dtype=float)
+        lambda_1 = np.empty((total_draws, n_new, periods), dtype=float)
+
+        if start > 0:
+            pre_lam = ndtr(eta_base[:, :, :start])
+            lambda_0[:, :, :start] = pre_lam
+            lambda_1[:, :, :start] = pre_lam
+
+        tau = eff_val * xi_arr  # (D, N, h)
+        lambda_1[:, :, start:] = ndtr(eta_base[:, :, start:] + (1.0 - p_mean) * tau)
+        lambda_0[:, :, start:] = ndtr(eta_base[:, :, start:] + (0.0 - p_mean) * tau)
+
+        stock_0 = 1.0 - np.cumprod(1.0 - lambda_0, axis=-1)
+        stock_1 = 1.0 - np.cumprod(1.0 - lambda_1, axis=-1)
+        diff = stock_1[:, :, start:] - stock_0[:, :, start:]  # (D, N, h)
+        out_draws = diff.transpose(1, 2, 0)  # (N, h, D)
+
+        return out_draws
 
     def summary(self, alpha: float = 0.05) -> HazardAdoptionResult:
         """Tidy summary of hazard, stock, and exposure contrasts."""

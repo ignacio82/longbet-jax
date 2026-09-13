@@ -22,8 +22,13 @@ import pandas as pd
 
 from longbet._coupled_hazard_iv import CoupledHazardConfig, CoupledHazardIV
 from longbet._encourage import encouragement_effects
-from longbet._encourage_bounds import encouragement_bounds
-from longbet._randomization_ar import randomization_ar
+
+try:
+    from .encouragement_bounds import encouragement_bounds
+    from .randomization_ar import randomization_ar
+except (ImportError, ValueError):
+    from encouragement_bounds import encouragement_bounds
+    from randomization_ar import randomization_ar
 
 
 @dataclass(frozen=True)

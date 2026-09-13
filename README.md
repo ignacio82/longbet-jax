@@ -152,27 +152,33 @@ probability differences even with memory-bounded prediction. The wrapper uses
 proper innovation priors by default. It reports posterior medians and quantiles
 of the signed Wald ratio, never a default ratio mean or a trimmed denominator.
 
-With `engine="direct_smooth"`, the model implements direct smooth shrinkage with
-Gaussian stump leaves across exposure duration and correlated unit random
-intercepts $\boldsymbol{\Sigma}_\gamma = \begin{pmatrix} \sigma_{\gamma_Y}^2 & \rho_\gamma \sigma_{\gamma_Y} \sigma_{\gamma_D} \\ \rho_\gamma \sigma_{\gamma_Y} \sigma_{\gamma_D} & \sigma_{\gamma_D}^2 \end{pmatrix}$.
-This absorbs persistent unit-level confounding ($\rho_\gamma$) across both outcome
-and compliance equations while smoothly regularizing dynamic compounding. The alternative
-`engine="longbet"` uses triangular SUR coupling innovation errors across equations.
-Both continuous outcomes and binary/LPM first stages are supported.
+With `engine="direct_smooth"`, the model uses Gaussian-process stump leaves
+indexed by time since encouragement, with a Matérn 3/2 kernel by default.
+It supports a continuous outcome and an LPM first stage, and predicts only the
+overall original-unit target. Unit intercepts are independent by default;
+`direct_config=DirectSmoothConfig(correlated_intercepts=True)` estimates their
+cross-equation covariance. Innovations remain independent. These are working
+reduced forms, not a structural adoption-duration model, and sums of stumps are
+additive in the supplied covariates rather than arbitrary interaction forests.
 
-When control units catch up organically over time, the first-stage compliance gap
-narrows, causing classical cross-sectional IV estimators to become volatile and
-suffer from ratio distortion. `LongBetEncourage` guards against this weak-instrument trap
-by regularizing across exposure horizons and providing design-based **Anderson–Rubin
-reference confidence sets** (`pred$reference`) that maintain mathematically guaranteed
-coverage in finite samples regardless of instrument strength.
+Direct prediction returns saved conditional-mean assignment contrasts averaged
+over observed study units. It no longer adds independent Gaussian noise under an
+unsupported finite-sample-imputation interpretation. Prediction metadata records
+this target; re-predict saved fits before reusing old interval summaries.
+
+Organic catch-up can weaken the current-adoption first stage. Temporal smoothing
+does not establish relevance, monotonicity, exclusion, or interval calibration.
+The Fieller/Anderson–Rubin-style reference sets in `pred.reference` invert a
+normal-approximation test using within-arm covariance. They preserve unbounded
+and disjoint sets, but do not guarantee exact finite-sample coverage. If outcomes
+depend on adoption history, a current-adoption Wald ratio is not automatically CACE.
 
 The [encouragement guide](docs/encouragement-guide.md) includes matching Python/R
-examples for subgroups, blocked and cluster targets, known probabilities,
-staggered cohorts, archive replay, and covariance-aware model/reference bootstrap
-comparisons. The [vignette](vignettes/LongBetEncourage.html) provides an extensive
-head-to-head comparison demonstrating how `LongBetEncourage` outperforms
-period-by-period 2SLS, pooled 2SLS, and two-way fixed effects 2SLS.
+examples, engine limits, archive replay, and model/reference comparisons. The
+[matched evaluation](benchmarks/encouragement/comparison-report.md) did not establish
+a reliable advantage over both adjusted IV comparators and found reduced-form
+undercoverage. Those results concern the archived configurations and source
+versions; they do not certify calibration after later model or prediction changes.
 
 ## The estimand
 

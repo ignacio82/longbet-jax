@@ -18,10 +18,10 @@ test_that("encouragement metadata accepts full compliance and no pre-periods", {
 test_that("encouragement summaries and estimates equal the Python results", {
   skip_without_engine()
   p <- encourage_panel()
-  lb <- longbet_py()
+  lb <- longbet:::longbet_py()
   summary <- encouragement_summary(p$z, p$d, alpha = 0.1)
   py_summary <- lb$encouragement_summary(z = p$z, d = p$d, alpha = 0.1)
-  py_summary <- as.data.frame(.encouragement_as_r(py_summary)); rownames(py_summary) <- NULL
+  py_summary <- as.data.frame(longbet:::.encouragement_as_r(py_summary)); rownames(py_summary) <- NULL
   attr(py_summary, "pandas.index") <- NULL
   expect_equal(summary, py_summary, tolerance = 0)
   expect_null(attr(summary, "pandas.index"))
@@ -31,7 +31,7 @@ test_that("encouragement summaries and estimates equal the Python results", {
 
   result <- encouragement_effects(p$y, p$d, p$z, alpha = 0.1)
   py_result <- lb$encouragement_effects(y = p$y, d = p$d, z = p$z, alpha = 0.1)
-  py_result <- as.data.frame(.encouragement_as_r(py_result)); rownames(py_result) <- NULL
+  py_result <- as.data.frame(longbet:::.encouragement_as_r(py_result)); rownames(py_result) <- NULL
   attr(py_result, "pandas.index") <- NULL
   expect_equal(result, py_result, tolerance = 0)
   expect_null(attr(result, "pandas.index"))

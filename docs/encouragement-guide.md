@@ -367,6 +367,25 @@ pred <- predict(fit)
 encouragement_wald(pred)
 ```
 
+Prediction returns the saved conditional-mean assignment contrasts averaged over
+observed study units, with posterior uncertainty in those mean functions. It does
+not impute realized finite-population missing potential outcomes. An earlier
+implementation added independent Gaussian noise with variance `sigma^2/N` and
+called it sample-effect imputation; that omitted the observed residual contribution
+and an explicit cross-assignment residual model. That noise has been removed.
+Refit or re-predict saved fits before reusing their old interval summaries. The
+Python direct backend uses `target="conditional_mean"`; `"population"` remains a
+legacy alias for the same observed-covariate average, and `"sample"` is rejected.
+Prediction metadata records this target. This correction does not establish
+frequentist coverage of the resulting posterior intervals.
+
+The default time kernel is Matérn 3/2; `direct_config` also permits RBF and
+Matérn 1/2 kernels. Smoothing does not constrain monotonicity, the sign of the
+first stage, or its probability bounds. Each tree is a stump, so sums of these
+trees provide additive covariate functions, not arbitrary interactions without
+supplied interaction features. Innovations are independent across equations;
+optional correlated unit intercepts provide the cross-equation dependence.
+
 This backend supports continuous outcomes, an LPM first stage, and summaries for
 the fitted population. It rejects binary/probit, subgroup and new-covariate
 prediction requests. Forest and prior options belong in `direct_config`;

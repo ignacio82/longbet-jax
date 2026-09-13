@@ -27,6 +27,8 @@ from longbet._encourage import (
     validate_encouragement,
 )
 from longbet._encourage_model import (
+    ConditionalEffect,
+    ConditionalEncouragementPrediction,
     EncouragementComparison,
     EncouragementPrediction,
     LongBetEncourage,
@@ -51,6 +53,7 @@ from longbet._coupled_hazard_iv import (
     CoupledHazardIV,
     CoupledHazardResult,
 )
+from longbet._orthogonal_iv import LongBetOrthogonalIV
 from longbet._io import load_npz, save_npz
 from longbet._multi_io import load_multi_npz, save_multi_npz
 from longbet._multi_model import (
@@ -89,6 +92,8 @@ __version__ = "0.1.0"
 __all__ = [
     "ROLLOUT_COLORS",
     "BlockAccumulator",
+    "ConditionalEffect",
+    "ConditionalEncouragementPrediction",
     "CoupledHazardConfig",
     "CoupledHazardIV",
     "CoupledHazardResult",
@@ -107,6 +112,7 @@ __all__ = [
     "LongBetEncourage",
     "LongBetMulti",
     "LongBetMultiPrediction",
+    "LongBetOrthogonalIV",
     "LongBetPrediction",
     "PosteriorSummary",
     "StabilityResult",

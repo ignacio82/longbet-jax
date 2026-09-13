@@ -236,3 +236,159 @@ def test_binary_pair_does_not_claim_sur_innovation_coupling(fitted, tmp_path):
     loaded = LongBetEncourage.load(path)
     assert loaded.metadata == fit.metadata
     np.testing.assert_array_equal(loaded.predict().draws["itt_y"], pred.draws["itt_y"])
+
+
+def test_predict_conditional_in_and_out_of_sample(fitted):
+    # In-sample conditional prediction
+    cond_in = fitted.predict_conditional()
+    n_in, t_post = fitted._data["x"].shape[0], fitted.predict().horizons.shape[0]
+    assert cond_in.citt_y.mean.shape == (n_in, t_post)
+    assert cond_in.citt_d.mean.shape == (n_in, t_post)
+    assert cond_in.cace.median.shape == (n_in, t_post)
+    assert np.all(np.isfinite(cond_in.citt_y.mean))
+    assert np.all(np.isfinite(cond_in.cace.median))
+
+    # Out-of-sample prediction on new units
+    n_new = 15
+    rng = np.random.default_rng(42)
+    x_new = rng.normal(size=(n_new, fitted._data["x"].shape[1]))
+    cond_out = fitted.predict_conditional(x=x_new)
+    assert cond_out.citt_y.mean.shape == (n_new, t_post)
+    assert cond_out.citt_d.mean.shape == (n_new, t_post)
+    assert cond_out.cace.median.shape == (n_new, t_post)
+
+    # Decision functions
+    cum = cond_out.cumulative_lift()
+    assert cum.shape == (n_new, cond_out.citt_y.draws.shape[-1])
+    prob = cond_out.breakeven_probability(cost=1.0)
+    assert prob.shape == (n_new,)
+    assert np.all((prob >= 0.0) & (prob <= 1.0))
+    policy = cond_out.optimal_policy(cost=1.0, hurdle=0.5)
+    assert policy.shape == (n_new,)
+    assert policy.dtype == bool
+    val = cond_out.policy_value(cost=1.0, hurdle=0.5)
+    assert np.isfinite(val)
+
+
+def test_monotonic_first_stage(fitted):
+    # Monotonicity enforced: all citt_d draws must be >= 0
+    cond_mono = fitted.predict_conditional(monotonic_first_stage=True)
+    assert np.all(cond_mono.citt_d.draws >= 0.0)
+    assert np.all(cond_mono.citt_d.mean >= 0.0)
+
+    # Monotonicity disabled: citt_d draws are unconstrained
+    cond_raw = fitted.predict_conditional(monotonic_first_stage=False)
+    assert cond_raw.citt_d.draws.shape == cond_mono.citt_d.draws.shape
+
+
+def test_cace_adaptive_shrinkage(fitted):
+    # Adaptive shrinkage
+    cond_adapt = fitted.predict_conditional(cace_shrinkage="adaptive", shrinkage_lambda=1.0)
+    assert np.all(np.isfinite(cond_adapt.cace.median))
+    assert np.all(np.isfinite(cond_adapt.cace.draws))
+
+    # Ridge shrinkage
+    cond_ridge = fitted.predict_conditional(cace_shrinkage="ridge", cace_stabilization=0.05)
+    assert np.all(np.isfinite(cond_ridge.cace.median))
+
+    # None
+    cond_none = fitted.predict_conditional(cace_shrinkage="none")
+    assert np.all(np.isfinite(cond_none.cace.median))
+
+    # Invalid shrinkage mode raises ValueError
+    with pytest.raises(ValueError, match="Unknown cace_shrinkage"):
+        fitted.predict_conditional(cace_shrinkage="invalid_mode")
+
+
+def test_knapsack_policy_and_budget_constraints(fitted):
+    cond = fitted.predict_conditional()
+    n_units = fitted._data["x"].shape[0]
+
+    # Capacity constraint: treating at most 3 accounts
+    policy_cap = cond.knapsack_policy(cost=0.5, capacity=3)
+    assert policy_cap.shape == (n_units,)
+    assert policy_cap.dtype == bool
+    assert np.sum(policy_cap) <= 3
+
+    # Budget constraint: budget = 2.5 with cost = 1.0 => max 2 units
+    policy_bud = cond.knapsack_policy(cost=1.0, budget=2.5)
+    assert np.sum(policy_bud) <= 2
+
+    # Insufficient budget for even 1 unit => 0 units treated
+    policy_zero = cond.knapsack_policy(cost=2.0, budget=1.0)
+    assert np.sum(policy_zero) == 0
+
+    # Both capacity and budget
+    policy_both = cond.knapsack_policy(cost=1.0, capacity=2, budget=5.0)
+    assert np.sum(policy_both) <= 2
+
+    # Different ranking metrics
+    for metric in ["expected_net_value", "certainty_adjusted", "breakeven_probability"]:
+        pol = cond.knapsack_policy(cost=0.5, capacity=2, ranking_metric=metric)
+        assert np.sum(pol) <= 2
+
+    with pytest.raises(ValueError, match="Unknown ranking_metric"):
+        cond.knapsack_policy(cost=0.5, ranking_metric="unknown")
+
+    # Policy value with budget/capacity
+    val_budget = cond.policy_value(cost=0.5, budget=2.0, capacity=2)
+    assert np.isfinite(val_budget)
+
+
+def test_principal_strata_estimation(fitted):
+    cond = fitted.predict_conditional()
+    df = cond.principal_strata()
+    assert isinstance(df, pd.DataFrame)
+    assert set(df["stratum"].unique()) == {"complier", "always_taker", "never_taker"}
+    assert "prob_mean" in df.columns
+    assert "count_mean" in df.columns
+    assert "n_total" in df.columns
+
+    # Probabilities per horizon should sum to ~1.0
+    for h in df["horizon"].unique():
+        sub = df[df["horizon"] == h]
+        total_p = sub["prob_mean"].sum()
+        np.testing.assert_allclose(total_p, 1.0, atol=0.05)
+        total_cnt = sub["count_mean"].sum()
+        np.testing.assert_allclose(total_cnt, sub["n_total"].iloc[0], atol=0.6)
+
+    # Human-readable summary
+    summary_txt = cond.strata_summary(horizon=0)
+    assert "Principal Strata Estimates" in summary_txt
+    assert "Complier" in summary_txt
+    assert "Always-Taker" in summary_txt
+    assert "Never-Taker" in summary_txt
+
+
+def test_longbet_encourage_hazard_first_stage(fitted):
+    data = fitted._data
+    cfg = LongBetConfig(
+        num_chains=1,
+        num_burnin=4,
+        num_sweeps=8,
+        num_trees_pr=2,
+        num_trees_trt=2,
+        random_seed=77,
+        sigma_prior_a=2.0,
+        sigma_prior_b=1.0,
+    )
+    model = LongBetEncourage(cfg, first_stage="hazard", outcome="continuous")
+    t_eq = np.arange(1, data["y"].shape[1] + 1, dtype=float)
+    model.fit(data["y"], data["d"], data["z"], data["x"], t=t_eq)
+
+    pred = model.predict_conditional()
+    assert pred.citt_d.mean.shape == (len(data["x"]), len(pred.horizons))
+    assert pred.citt_y.mean.shape == (len(data["x"]), len(pred.horizons))
+    assert pred.cace.median.shape == (len(data["x"]), len(pred.horizons))
+    assert np.all(pred.citt_d.mean >= 0.0)
+    assert np.all(np.isfinite(pred.cace.median))
+
+    # Out-of-sample prediction
+    rng = np.random.default_rng(91)
+    x_new = rng.normal(size=(5, data["x"].shape[1]))
+    pred_out = model.predict_conditional(x=x_new)
+    assert pred_out.citt_d.mean.shape == (5, len(pred.horizons))
+    assert pred_out.cace.median.shape == (5, len(pred.horizons))
+
+
+

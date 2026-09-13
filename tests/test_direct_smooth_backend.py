@@ -299,3 +299,24 @@ def test_correlated_equation_updates_preserve_dense_joint_posterior():
     covariance_z = (np.cov(samples, rowvar=False) - target_variance) / covariance_mcse
     assert np.max(np.abs(mean_z)) < 5.5
     assert np.max(np.abs(covariance_z)) < 5.5
+
+
+def test_prediction_preserves_fitted_mean_draws_without_added_imputation_noise(tmp_path):
+    """The reported ITTs must be the saved model contrasts, including after replay."""
+    y, d, z, x, t = make_test_data(n=20)
+    model = LongBetDirectSmooth(DirectSmoothConfig(baseline_trees=1, effect_trees=1))
+    model.fit(y, d, z, x, t, seed=72, chains=2, burnin=5, draws=8)
+    pred = model.predict()
+    for quantity in ("itt_y", "itt_d"):
+        expected = model.draws[quantity].transpose(2, 0, 1)[None, ...]
+        np.testing.assert_array_equal(pred.draws[quantity], expected)
+    assert pred.metadata["prediction_target"] == "conditional_mean_over_observed_units"
+    assert pred.metadata["counterfactual_imputation"] is False
+    archive = tmp_path / "mean-contrasts.npz"
+    model.save(archive)
+    replayed = LongBetDirectSmooth.load(archive).predict()
+    for quantity in ("itt_y", "itt_d", "wald"):
+        np.testing.assert_array_equal(pred.draws[quantity], replayed.draws[quantity])
+    np.testing.assert_array_equal(model.predict(target="population").draws["itt_y"], pred.draws["itt_y"])
+    with pytest.raises(ValueError, match="finite-population imputation"):
+        model.predict(target="sample")

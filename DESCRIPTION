@@ -32,5 +32,5 @@ Suggests:
     yaml
 NeedsCompilation: no
 Encoding: UTF-8
-RoxygenNote: 7.3.1
 Config/testthat/edition: 3
+Config/roxygen2/version: 8.1.0

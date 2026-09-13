@@ -3,7 +3,8 @@
 Parameterizes the panel reduced forms directly as:
     Y_{kit} = m_k(X_i, t) + gamma_{ki} + (Z_i - p) * 1(t >= t_0) * tau_k(X_i, t - t_0) + eps_{kit}
 
-Leaves contain smooth Gaussian Process time vectors with fixed RBF covariance.
+Leaves contain Gaussian-process time vectors with a fixed configurable covariance
+(default Matérn 3/2).
 Tree topologies are sampled using exact finite-stump collapsed Gibbs steps.
 Baseline and effect leaves and unit intercepts can be drawn jointly conditional on
 topologies (direct_joint), removing the multiplicative parameterization.
@@ -563,7 +564,7 @@ class LongBetDirectSmooth:
         *,
         groups: Any = None,
         alpha: float = 0.05,
-        target: str = "sample",
+        target: str = "conditional_mean",
     ) -> EncouragementPrediction:
         """Create EncouragementPrediction object compatible with standard evaluation.
 
@@ -571,34 +572,27 @@ class LongBetDirectSmooth:
         ----------
         groups : unsupported for direct_smooth (must be None)
         alpha : significance level (default 0.05)
-        target : 'sample' for Sample Average Treatment Effect (SATE) with
-                 finite-sample counterfactual imputation variance, or 'population'
-                 for superpopulation conditional mean function PATE.
+        target : 'conditional_mean' (default), or its legacy alias 'population'.
+                 Average conditional-mean assignment contrasts over the observed
+                 study units. Realized finite-population potential-outcome effects
+                 require a joint counterfactual model and are not implemented.
         """
         if not self.fitted_:
             raise RuntimeError("LongBetDirectSmooth must be fitted before predict().")
         if groups is not None:
             raise ValueError("direct_smooth stores only the all-unit target; groups are unsupported.")
-        if target not in ("sample", "population"):
-            raise ValueError("target must be 'sample' or 'population'.")
+        if target not in ("conditional_mean", "population"):
+            raise ValueError(
+                "target must be 'conditional_mean' (or legacy alias 'population'). "
+                "Realized finite-population imputation (target='sample') is not supported."
+            )
         _critical(alpha)
+        # These saved draws already contain posterior uncertainty in the mean
+        # functions. Adding independent sigma/sqrt(N) noise is not a posterior
+        # draw of a realized sample effect: it omits the observed residual and
+        # assumes an unspecified cross-assignment residual distribution.
         dy = self.draws["itt_y"].copy()  # (chains, draws, h)
         dd = self.draws["itt_d"].copy()
-
-        if target == "sample":
-            # Finite-sample SATE counterfactual imputation:
-            # Impute the unobserved potential outcomes for each unit and draw
-            # The missing counterfactual contributes residual variance sigma^2 / N to the sample average
-            n_units = len(self._data["z"])
-            scale_y = float(self._data["y"].std())
-            scale_d = float(self._data["d"].std())
-            sig_y = np.sqrt(self.draws["sigma2"][:, :, 0]) * scale_y
-            sig_d = np.sqrt(self.draws["sigma2"][:, :, 1]) * scale_d
-            rng_sate = np.random.default_rng(int(self.metadata["sampler"]["seed"]) + 999)
-            noise_y = rng_sate.normal(size=dy.shape) * (sig_y[..., None] / np.sqrt(n_units))
-            noise_d = rng_sate.normal(size=dd.shape) * (sig_d[..., None] / np.sqrt(n_units))
-            dy += noise_y
-            dd += noise_d
 
         chains, draws, h = dy.shape
         # Format axes to (group, horizon, chain, draw)
@@ -625,7 +619,10 @@ class LongBetDirectSmooth:
             standardization="conditional",
             provenance="direct_smooth",
         )
-        return EncouragementPrediction(std_draws, ref_df, self.metadata, alpha=alpha)
+        metadata = dict(self.metadata,
+                        prediction_target="conditional_mean_over_observed_units",
+                        counterfactual_imputation=False)
+        return EncouragementPrediction(std_draws, ref_df, metadata, alpha=alpha)
 
     def save(self, path: str | Path) -> None:
         """Save a versioned, pickle-free archive of study data and all traces."""

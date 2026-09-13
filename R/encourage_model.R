@@ -68,7 +68,7 @@
 #' @param x Baseline covariates, `[N x P]`.
 #' @param t Increasing calendar vector with whole-unit gaps; defaults to `1:T`.
 #' @param x_trt Optional baseline treatment-forest covariates.
-#' @param first_stage Required choice, `"lpm"` or `"probit"`.
+#' @param first_stage Required choice, `"lpm"`, `"probit"`, or `"hazard"`.
 #' @param outcome `"continuous"` or `"binary"` for `y`.
 #' @param config Named list of Python `LongBetConfig` sampler options. With no
 #'   variance options supplied, the wrapper uses proper IG(2,1) innovation priors.
@@ -76,10 +76,8 @@
 #'   follow `longbet()`. Set `num_chains`, `num_burnin`, `num_sweeps`, and
 #'   `random_seed` here; convergence still requires checking.
 #' @param verbose Whether to print a fitting message.
-#' @param engine `"longbet"` or `"direct_smooth"`. The latter uses Gaussian
-#'   smooth stump leaves and supports only continuous outcomes and an LPM first
-#'   stage. Its `config` accepts only `num_chains`, `num_burnin`, `num_sweeps`,
-#'   `n_skip`, and `random_seed`. Prediction supports the all-unit target only.
+#' @param engine `"longbet"`, `"direct_smooth"`, or `"orthogonal_iv"`. The direct-smooth
+#'   uses Gaussian smooth stump leaves. The orthogonal_iv uses two-stage orthogonalized BCF.
 #' @param direct_config Named list of `DirectSmoothConfig` forest and prior
 #'   options for `engine = "direct_smooth"`. Set `correlated_intercepts = TRUE`
 #'   to estimate a covariance between the two equations' unit intercepts.
@@ -103,10 +101,10 @@ longbet_encourage <- function(y, d, z, x, t = NULL, x_trt = NULL,
                              first_stage, outcome = "continuous",
                              config = list(), verbose = FALSE,
                              engine = "longbet", direct_config = list()) {
-  if (missing(first_stage)) stop("Choose first_stage = 'lpm' or 'probit' explicitly.", call. = FALSE)
-  first_stage <- match.arg(first_stage, c("lpm", "probit"))
+  if (missing(first_stage)) stop("Choose first_stage = 'lpm', 'probit', or 'hazard' explicitly.", call. = FALSE)
+  first_stage <- match.arg(first_stage, c("lpm", "probit", "hazard"))
   outcome <- match.arg(outcome, c("continuous", "binary"))
-  engine <- match.arg(engine, c("longbet", "direct_smooth"))
+  engine <- match.arg(engine, c("longbet", "direct_smooth", "orthogonal_iv"))
   lb <- longbet_py()
   options <- .encouragement_config_args(config, lb)
   direct_options <- .encouragement_config_args(direct_config, lb, direct = TRUE)
@@ -134,6 +132,12 @@ longbet_encourage <- function(y, d, z, x, t = NULL, x_trt = NULL,
 
 #' Predict common-population encouragement effects
 #'
+#' With the direct-smoothing engine, draws are conditional-mean assignment
+#' contrasts averaged over observed study units. No extra residual noise or
+#' realized finite-population counterfactual imputation is added. The prediction
+#' metadata records this target. Re-predict saved fits to replace earlier
+#' direct-engine summaries that added unsupported imputation noise.
+#'
 #' @param object A fitted `longbet_encourage` object, including one read by
 #'   `readRDS()` in another session.
 #' @param summary_only Avoid retaining full unit/period/draw arrays. Aggregate
@@ -159,9 +163,13 @@ longbet_encourage <- function(y, d, z, x, t = NULL, x_trt = NULL,
 #'   confidence sets with infinite endpoints and unavailable cases preserved.
 #' @export
 predict.longbet_encourage <- function(object, summary_only = TRUE, groups = NULL,
-                                     block_size = NULL, standardization = "conditional",
-                                     alpha = 0.05, min_ess = 400, max_rhat = 1.01,
-                                     practical_threshold = NULL, ...) {
+                                      block_size = NULL, standardization = "conditional",
+                                      alpha = 0.05, min_ess = 400, max_rhat = 1.01,
+                                      practical_threshold = NULL, ...) {
+  dots <- list(...)
+  if (!is.null(dots$new_x)) {
+    return(do.call(predict_conditional, c(list(object = object, alpha = alpha), dots)))
+  }
   .reject_unsupported(...)
   if (!is.null(block_size)) {
     if (!is.numeric(block_size) || length(block_size) != 1L ||
@@ -377,3 +385,268 @@ design_encouragement_effects <- function(y, d, z, t = NULL, design = NULL,
        covariance_index = .encouragement_plain(result$covariance$index$to_frame(index = FALSE)),
        metadata = .encouragement_plain(result$metadata))
 }
+
+#' Predict conditional encouragement effects and business decisions
+#'
+#' Evaluates the fitted LongBet model to produce unit-level Conditional
+#' Intent-to-Treat on the outcome (CITT_Y), adoption compliance (CITT_D),
+#' and conditional CACE, along with risk-aware decision metrics.
+#' Supports predicting out-of-sample on new units.
+#'
+#' @param object A fitted `longbet_encourage` object.
+#' @param new_x Optional baseline covariates matrix for new units, `[N_new x P]`.
+#'   If NULL, evaluates on the original training units.
+#' @param new_z Optional counterfactual encouragement schedule, `[N_new x T]`.
+#'   If NULL, assumes encouragement is assigned from the encouragement start period onward.
+#' @param t Optional calendar time vector; defaults to the fitted calendar.
+#' @param cost Optional positive scalar per-unit encouragement cost.
+#' @param hurdle Decision certainty hurdle in (0, 1), default 0.50 (risk neutral).
+#' @param alpha Significance level for credible intervals (default 0.05 for 90% CIs).
+#' @param cace_stabilization Denominator regularization parameter for CACE (default 0.02).
+#' @param ... Reserved for future expansion.
+#' @param monotonic_first_stage If TRUE (default), enforces non-negative first-stage compliance.
+#' @param cace_shrinkage Shrinkage mode for CACE: `"adaptive"` (default Empirical Bayes /
+#'   James-Stein shrinkage toward population CACE), `"ridge"`, or `"none"`.
+#' @param shrinkage_lambda Multiplier for adaptive shrinkage strength (default 1.0).
+#' @param budget Optional total monetary budget constraint on encouragement.
+#' @param capacity Optional integer cap on the maximum number of accounts targeted.
+#' @param ranking_metric Prioritization metric for resource-constrained selection:
+#'   `"expected_net_value"` (default), `"certainty_adjusted"`, or `"breakeven_probability"`.
+#' @param ... Reserved for future expansion.
+#' @return A `longbet_conditional_pred` list containing `citt_y`, `citt_d`,
+#'   `cace`, `cumulative_lift`, `breakeven_prob`, `decision`, `policy_value`,
+#'   `periods`, `horizons`, `cost`, `hurdle`, `budget`, `capacity`, and `alpha`.
+#' @export
+predict_conditional <- function(object, new_x = NULL, new_z = NULL, t = NULL,
+                                cost = NULL, hurdle = 0.50, alpha = 0.05,
+                                cace_stabilization = 0.02,
+                                monotonic_first_stage = TRUE,
+                                cace_shrinkage = "adaptive",
+                                shrinkage_lambda = 1.0,
+                                budget = NULL, capacity = NULL,
+                                ranking_metric = "expected_net_value", ...) {
+  UseMethod("predict_conditional")
+}
+
+#' @export
+predict_conditional.longbet_encourage <- function(object, new_x = NULL, new_z = NULL, t = NULL,
+                                                  cost = NULL, hurdle = 0.50, alpha = 0.05,
+                                                  cace_stabilization = 0.02,
+                                                  monotonic_first_stage = TRUE,
+                                                  cace_shrinkage = "adaptive",
+                                                  shrinkage_lambda = 1.0,
+                                                  budget = NULL, capacity = NULL,
+                                                  ranking_metric = "expected_net_value", ...) {
+  engine <- .encouragement_load(object)
+  x_py <- if (is.null(new_x)) NULL else reticulate::r_to_py(as.matrix(new_x))
+  z_py <- if (is.null(new_z)) NULL else reticulate::r_to_py(as.matrix(new_z))
+  t_py <- if (is.null(t)) NULL else reticulate::r_to_py(as.numeric(t))
+  pred <- engine$predict_conditional(
+    x = x_py, z = z_py, t = t_py, alpha = alpha, cace_stabilization = cace_stabilization,
+    monotonic_first_stage = monotonic_first_stage,
+    cace_shrinkage = cace_shrinkage,
+    shrinkage_lambda = shrinkage_lambda
+  )
+
+  citt_y_draws <- .encouragement_plain(pred$citt_y$draws)
+  citt_y_mean <- .encouragement_plain(pred$citt_y$mean)
+  citt_y_median <- .encouragement_plain(pred$citt_y$median)
+  citt_y_lower <- .encouragement_plain(pred$citt_y$lower)
+  citt_y_upper <- .encouragement_plain(pred$citt_y$upper)
+  citt_y_sd <- .encouragement_plain(pred$citt_y$sd)
+
+  citt_d_draws <- .encouragement_plain(pred$citt_d$draws)
+  citt_d_mean <- .encouragement_plain(pred$citt_d$mean)
+  citt_d_median <- .encouragement_plain(pred$citt_d$median)
+  citt_d_lower <- .encouragement_plain(pred$citt_d$lower)
+  citt_d_upper <- .encouragement_plain(pred$citt_d$upper)
+  citt_d_sd <- .encouragement_plain(pred$citt_d$sd)
+
+  cace_draws <- .encouragement_plain(pred$cace$draws)
+  cace_mean <- .encouragement_plain(pred$cace$mean)
+  cace_median <- .encouragement_plain(pred$cace$median)
+  cace_lower <- .encouragement_plain(pred$cace$lower)
+  cace_upper <- .encouragement_plain(pred$cace$upper)
+  cace_sd <- .encouragement_plain(pred$cace$sd)
+
+  periods <- unlist(.encouragement_plain(pred$periods), use.names = FALSE)
+  horizons <- unlist(.encouragement_plain(pred$horizons), use.names = FALSE)
+
+  # Cumulative lift across post-treatment horizons: [N x D]
+  cum_draws <- apply(citt_y_draws, c(1, 3), sum)
+  cum_mean <- rowMeans(cum_draws)
+  cum_median <- apply(cum_draws, 1, stats::median)
+  cum_lower <- apply(cum_draws, 1, stats::quantile, probs = alpha / 2)
+  cum_upper <- apply(cum_draws, 1, stats::quantile, probs = 1 - alpha / 2)
+
+  breakeven_prob <- if (!is.null(cost)) rowMeans(cum_draws > cost) else NULL
+
+  decision <- if (!is.null(cost)) {
+    if (!is.null(budget) || !is.null(capacity)) {
+      as.logical(.encouragement_plain(pred$knapsack_policy(
+        cost = as.numeric(cost),
+        budget = if (!is.null(budget)) as.numeric(budget) else NULL,
+        capacity = if (!is.null(capacity)) as.integer(capacity) else NULL,
+        hurdle = as.numeric(hurdle),
+        ranking_metric = ranking_metric
+      )))
+    } else {
+      (breakeven_prob >= hurdle)
+    }
+  } else NULL
+
+  policy_val <- if (!is.null(decision) && !is.null(cost)) {
+    mean(ifelse(decision, cum_mean - as.numeric(cost), 0.0))
+  } else NULL
+
+  strata_df <- tryCatch({
+    as.data.frame(.encouragement_plain(pred$principal_strata()))
+  }, error = function(e) NULL)
+
+  structure(list(
+    citt_y = list(mean = citt_y_mean, median = citt_y_median, lower = citt_y_lower,
+                  upper = citt_y_upper, sd = citt_y_sd, draws = citt_y_draws),
+    citt_d = list(mean = citt_d_mean, median = citt_d_median, lower = citt_d_lower,
+                  upper = citt_d_upper, sd = citt_d_sd, draws = citt_d_draws),
+    cace = list(mean = cace_mean, median = cace_median, lower = cace_lower,
+                upper = cace_upper, sd = cace_sd, draws = cace_draws),
+    cumulative_lift = list(draws = cum_draws, mean = cum_mean, median = cum_median,
+                           lower = cum_lower, upper = cum_upper),
+    breakeven_prob = breakeven_prob,
+    decision = decision,
+    policy_value = policy_val,
+    cost = cost,
+    hurdle = hurdle,
+    budget = budget,
+    capacity = capacity,
+    ranking_metric = ranking_metric,
+    periods = periods,
+    horizons = horizons,
+    alpha = alpha,
+    strata = strata_df
+  ), class = "longbet_conditional_pred")
+}
+
+#' Multi-objective resource-constrained encouragement policy
+#'
+#' Prioritizes encouragement targeting under hard budget or account capacity constraints.
+#'
+#' @param pred A `longbet_conditional_pred` object from [predict_conditional()].
+#' @param cost Per-unit encouragement cost.
+#' @param budget Optional total monetary expenditure cap.
+#' @param capacity Optional integer cap on maximum treated accounts.
+#' @param hurdle Decision certainty hurdle in (0, 1), default 0.50.
+#' @param ranking_metric Prioritization metric: `"expected_net_value"` (default),
+#'   `"certainty_adjusted"`, or `"breakeven_probability"`.
+#' @return Logical vector of length N indicating targeting decision.
+#' @export
+knapsack_policy <- function(pred, cost, budget = NULL, capacity = NULL,
+                            hurdle = 0.50, ranking_metric = "expected_net_value") {
+  if (!inherits(pred, "longbet_conditional_pred")) {
+    stop("pred must be a longbet_conditional_pred object.", call. = FALSE)
+  }
+  cost <- as.numeric(cost)
+  if (!is.finite(cost) || cost < 0) stop("cost must be a nonnegative numeric scalar.", call. = FALSE)
+  
+  expected_net <- pred$cumulative_lift$mean - cost
+  p_breakeven <- if (!is.null(pred$breakeven_prob)) pred$breakeven_prob else rowMeans(pred$cumulative_lift$draws > cost)
+  sd_lift <- apply(pred$cumulative_lift$draws, 1, stats::sd)
+
+  n_units <- length(expected_net)
+  eligible_idx <- which(p_breakeven >= hurdle & expected_net > 0)
+
+  max_units <- n_units
+  if (!is.null(capacity)) max_units <- min(max_units, as.integer(capacity))
+  if (!is.null(budget)) max_units <- min(max_units, as.integer(floor(budget / cost)))
+
+  decision <- rep(FALSE, n_units)
+  if (max_units <= 0 || length(eligible_idx) == 0) return(decision)
+
+  if (length(eligible_idx) <= max_units) {
+    decision[eligible_idx] <- TRUE
+    return(decision)
+  }
+
+  scores <- switch(
+    ranking_metric,
+    "expected_net_value" = expected_net,
+    "certainty_adjusted" = expected_net / (sd_lift + 1e-6),
+    "breakeven_probability" = p_breakeven,
+    stop(sprintf("Unknown ranking_metric '%s'.", ranking_metric), call. = FALSE)
+  )
+
+  eligible_scores <- scores[eligible_idx]
+  order_idx <- order(-eligible_scores)
+  selected <- eligible_idx[order_idx[seq_len(max_units)]]
+  decision[selected] <- TRUE
+  decision
+}
+
+#' Estimate principal strata probabilities and counts (Compliers, Never-Takers, Always-Takers)
+#'
+#' @param object A `longbet_conditional_pred` object from [predict_conditional()].
+#' @param horizon Optional 0-based horizon index. If NULL (default), returns all horizons.
+#' @return A data.frame with columns `period`, `horizon`, `stratum`, `prob_mean`, `prob_median`,
+#'   `prob_lower`, `prob_upper`, `count_mean`, `count_median`, `count_lower`, `count_upper`, `n_total`.
+#' @export
+principal_strata <- function(object, horizon = NULL) {
+  UseMethod("principal_strata")
+}
+
+#' @export
+principal_strata.longbet_conditional_pred <- function(object, horizon = NULL) {
+  df <- object$strata
+  if (is.null(df)) {
+    stop("Principal strata estimates are not available on this object.")
+  }
+  if (!is.null(horizon)) {
+    df <- df[df$horizon == as.integer(horizon), , drop = FALSE]
+  }
+  df
+}
+
+#' Print human-readable summary of principal strata estimates
+#'
+#' @param object A `longbet_conditional_pred` object from [predict_conditional()].
+#' @param horizon Optional exposure horizon index. Defaults to the first available horizon.
+#' @export
+strata_summary <- function(object, horizon = NULL) {
+  UseMethod("strata_summary")
+}
+
+#' @export
+strata_summary.longbet_conditional_pred <- function(object, horizon = NULL) {
+  df <- object$strata
+  if (is.null(df) || nrow(df) == 0) {
+    cat("Principal strata estimates are not available.\n")
+    return(invisible(NULL))
+  }
+  available_h <- sort(unique(df$horizon))
+  target_h <- if (is.null(horizon)) available_h[1] else as.integer(horizon)
+  sub <- df[df$horizon == target_h, ]
+  if (nrow(sub) == 0) {
+    stop(sprintf("Horizon %s not found. Available horizons: %s", target_h, paste(available_h, collapse = ", ")))
+  }
+  p_val <- sub$period[1]
+  n_units <- sub$n_total[1]
+  cat(sprintf("Principal Strata Estimates at Horizon %s (Period %.2f, N = %d):\n", target_h, p_val, n_units))
+  for (i in seq_len(nrow(sub))) {
+    r <- sub[i, ]
+    st <- gsub("_", "-", tools::toTitleCase(as.character(r$stratum)))
+    cat(sprintf("  • %-13s: %5.1f%% (95%% CI: [%.1f%%, %.1f%%])  —  ~%.1f units (95%% CI: [%.1f, %.1f])\n",
+                st, r$prob_mean * 100, r$prob_lower * 100, r$prob_upper * 100,
+                r$count_mean, r$count_lower, r$count_upper))
+  }
+  c_row <- sub[sub$stratum == "complier", ]
+  if (nrow(c_row) > 0) {
+    if (c_row$prob_mean < 0.10) {
+      cat("  [WARNING: Weak Instrument detected - complier share < 10%]\n")
+    } else {
+      cat("  [Robust Instrument - complier share exceeds 10% threshold]\n")
+    }
+  }
+  invisible(sub)
+}
+
+
+

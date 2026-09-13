@@ -29,7 +29,13 @@ covariance is a numeric matrix in itt_covariance; both axes follow rows of
 itt_covariance_index, with group, horizon and quantity labels.
 Aggregate draw axes are group, horizon, chain, retained draw; cell draw axes
 are unit, period, chain-major draw. Period indices are zero based.}
-\details{Wald summaries use medians and quantiles, with no default ratio mean.
+\details{For the direct-smoothing engine, posterior draws are conditional-mean
+assignment contrasts averaged over observed study units. No extra residual noise
+or realized finite-population counterfactual imputation is added. Metadata records
+this target. Re-predict saved fits to replace earlier direct-engine summaries
+that added unsupported imputation noise.
+
+Wald summaries use medians and quantiles, with no default ratio mean.
 The wald table withholds intervals failing diagnostics; wald_unchecked permits
 inspection. No denominator draws are clipped or removed. Frequentist confidence
 sets remain separate in reference. Infinite endpoints, unavailable references

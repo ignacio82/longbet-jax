@@ -223,3 +223,22 @@ def test_invalid_covariates_and_irregular_times_rejected():
         HazardAdoptionForest().fit(d, z, x, t)
     with pytest.raises(ValueError, match="equally spaced"):
         HazardAdoptionForest().fit(d, z, np.ones_like(x), [0, 1, 3, 4])
+
+
+def test_hazard_adoption_predict_unit_level_and_absorbing():
+    d, z, x, t = make_hazard_data(n=30, t_len=4, scenario="acceleration", seed=88)
+    config = HazardConfig(trees=2, cutpoints=3)
+    forest = HazardAdoptionForest(config).fit(d, z, x, t=t, seed=42, chains=2, burnin=10, draws=20)
+
+    # In-sample prediction: shape (N, H, draws)
+    pred_in = forest.predict()
+    assert pred_in.shape == (30, 3, 40)
+    assert np.all(np.isfinite(pred_in))
+
+    # Out-of-sample prediction on new units
+    rng = np.random.default_rng(123)
+    x_new = rng.normal(size=(12, 2))
+    pred_out = forest.predict(x_new)
+    assert pred_out.shape == (12, 3, 40)
+    assert np.all(np.isfinite(pred_out))
+
