@@ -4,22 +4,19 @@
 \title{LongBet: Bayesian ensemble trees for causal inference on longitudinal data}
 \usage{
 longbet(y, x, z, t = NULL, x_trt = NULL, x_tv = NULL, x_trt_tv = NULL,
-  ps = NULL, num_sweeps = 250, num_burnin = 2000, n_skip = 2, num_chains = 4,
+  ps = NULL, num_sweeps = 1000, num_burnin = 2000, n_skip = 1, num_chains = 4,
   inner_loop_length = NULL, num_trees_pr = 20, num_trees_trt = 20,
   min_points_per_leaf_pr = 10, min_points_per_leaf_trt = 10,
   max_depth_pr = 10, max_depth_trt = 10, alpha_split_pr = 0.95,
   beta_split_pr = 2, alpha_split_trt = 0.25, beta_split_trt = 3,
   num_cutpoints = 100, sig_knl = 1, lambda_knl = 1, kernel_type = "se",
-  gp_jitter = 1e-06, sigma_m = 1, gp_constant_mean = TRUE,
-  split_time_ps = TRUE, split_time_trt = TRUE, random_intercept = TRUE,
-  gamma_prior_a = 1, gamma_prior_b = 0.1, sigma_prior_a = 0,
-  sigma_prior_b = 0, sigma_b = 0.7071067811865476, sigma_alpha = 1,
-  outcome = c("continuous", "binary", "ordinal"), a_scaling = FALSE, b_scaling = TRUE,
-  ridge_move = TRUE, ridge_proposal_sigma = 0.2, standardize = TRUE,
-  random_seed = 0, device = c("auto", "cpu", "gpu"),
-  sur = TRUE, sur_prior_var = 1, num_shared_trees = 0,
-  shared_variance_fraction = 0.5, verbose = FALSE, num_categories = NULL,
-  cutpoint_prior_scale = 5.0, ...)
+  sigma_m = 1, gp_constant_mean = TRUE, split_time_ps = TRUE,
+  split_calendar_trt = TRUE, random_intercept = TRUE, gamma_prior_a = 1,
+  gamma_prior_b = 0.1, sigma_prior_a = 2, sigma_prior_b = 1,
+  outcome = c("continuous", "binary", "ordinal"), tempering_levels = 1,
+  tempering_beta_min = 0.05, standardize = TRUE, random_seed = 0,
+  device = c("auto", "cpu", "gpu"), sur = TRUE, sur_prior_var = 1,
+  verbose = FALSE, num_categories = NULL, cutpoint_prior_scale = 5, ...)
 }
 \arguments{
 \item{y}{Outcome panel, \code{[N x T]}. \code{NA} marks an unobserved cell;
@@ -51,41 +48,40 @@ prediction cost and trace storage approximately fixed.}
 \item{lambda_knl}{Kernel lengthscale over the exposure index.}
 \item{kernel_type}{One of \code{"se"}, \code{"matern32"}, \code{"matern52"},
 \code{"ar1"}.}
-\item{gp_jitter}{Relative diagonal jitter on the kernel.}
 \item{sigma_m}{Prior standard deviation of the marginalized constant GP mean.}
 \item{gp_constant_mean}{Whether the projection reverts to an estimated common
 level rather than to zero.}
 \item{split_time_ps}{Whether the \emph{prognostic} forest may split on calendar
 time.}
-\item{split_time_trt}{Whether the \emph{treatment} forest may split on the
-exposure index.}
+\item{split_calendar_trt}{Whether the \emph{treatment} forest may split on
+calendar time. The forest never splits on the exposure clock: \code{beta_S}
+carries the whole exposure profile. Calendar splits let the effect differ by
+period in staggered designs.}
 \item{random_intercept}{Whether to fit unit random intercepts.}
 \item{gamma_prior_a, gamma_prior_b}{Inverse-gamma prior on the unit-intercept
 variance.}
-\item{sigma_prior_a, sigma_prior_b}{Inverse-gamma prior on the error variance;
-\code{(0, 0)} is the improper reference prior.}
-\item{sigma_b}{Prior standard deviation of the adaptive coding weights.}
-\item{sigma_alpha}{Prior standard deviation of the prognostic scale.}
+\item{sigma_prior_a, sigma_prior_b}{Inverse-gamma prior on the error variance on
+the standardized scale; the default IG(2, 1) is proper with prior mean 1.}
 \item{outcome}{\code{"continuous"}, \code{"binary"} (probit), or \code{"ordinal"} (ordered probit).}
 \item{num_categories}{Declared integer category count >=2 for ordinal outcomes;
 \code{NULL} otherwise. Use explicit numeric labels \code{0,...,K-1}.
 Empty categories are allowed; ordinal outcomes are never standardized.}
 \item{cutpoint_prior_scale}{Finite positive ordered-normal cutpoint prior scale
 in latent probit units, default 5. Inactive for nonordinal outcomes or K=2.}
-\item{a_scaling}{Whether to sample the prognostic scale \code{alpha}.}
-\item{b_scaling}{Whether to sample the adaptive coding weights \code{b0},
-\code{b1}. On by default.}
-\item{ridge_move}{Whether to run the Metropolis move along the beta-nu ridge.}
-\item{ridge_proposal_sigma}{Proposal standard deviation for \code{log c}.}
+\item{tempering_levels}{Parallel-tempering replicas per chain. \code{1} runs the
+plain sampler; \code{K > 1} runs every chain as a ladder of \code{K} replicas with
+inverse temperatures equally spaced in their square root down to \code{tempering_beta_min},
+exchanges states between adjacent levels after every sweep, and keeps only
+the posterior replicas. Same posterior; lets chains cross between forest
+modes that single-tree moves cannot connect, at \code{K} times the cost.}
+
+\item{tempering_beta_min}{Inverse temperature of the hottest replica.}
+
 \item{standardize}{Whether to centre and scale a continuous outcome internally.}
 \item{random_seed}{Base PRNG seed.}
 \item{device}{\code{"auto"}, \code{"cpu"} or \code{"gpu"}.}
 \item{sur}{Whether to enable full-precision triangular SUR coupling (inert for scalar \code{longbet}).}
 \item{sur_prior_var}{Prior variance for loading regression parameters.}
-\item{num_shared_trees}{Must be zero for scalar fits. Use
-\code{\link{longbet_multi}} to share treatment partitions across outcomes.}
-\item{shared_variance_fraction}{Shared treatment-forest prior variance fraction,
-strictly between 0 and 1; inert for scalar fits.}
 \item{verbose}{Whether to print progress messages.}
 \item{...}{Reserved. Passing an unsupported argument is an error rather than
 being silently ignored.}
@@ -103,9 +99,10 @@ their uncertainty; archive loaders reject missing sampler provenance.
 \section{Estimand}{
 The reported effect is the contrast between being \code{S} periods into
 treatment and not being treated at all,
-\deqn{\tau_t(X_i, S) = b_1 \beta_S \nu(X_i, S, t) - b_0 \beta_0 \nu(X_i, 0, t),}
-so the treatment forest is evaluated on both the factual exposure and a copy of
-the design with \eqn{S = 0}.
+\deqn{\tau_t(X_i, S) = \beta_S \nu(X_i, t),}
+the exposure trajectory times the treatment forest. The treatment term enters
+treated cells only, so the untreated surface is the prognostic forest plus the
+unit intercept.
 }
 \section{Sampling defaults}{
 The defaults use 2,000 burn-in iterations and 250 retained draws, thinned by

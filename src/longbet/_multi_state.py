@@ -39,7 +39,6 @@ from longbet._state import (
     chain_filter_spec,
     init_longbet,
 )
-from longbet._shared_forest import SharedTreatmentForest, init_shared_forest
 
 
 class MultiLongBetState(eqx.Module):
@@ -70,7 +69,6 @@ class MultiLongBetState(eqx.Module):
     sur_active: bool = field(static=True)
     sur_prior_var: float = field(static=True)
     continuous_mask: tuple[bool, ...] = field(static=True)
-    shared_forest: SharedTreatmentForest | None = None
 
     @property
     def has_chain_axis(self) -> bool:
@@ -159,17 +157,13 @@ def init_multi_longbet(
     across all M outcome equations.
     """
     M = norm_input.M
-    if config.num_shared_trees and mesh is not None:
-        raise ValueError("Shared treatment trees currently require mesh=None (single-device execution); parallel MCMC chains are supported.")
     continuous_mask = tuple(t == "continuous" for t in norm_input.internal_outcomes)
 
     child_states = []
     for m in range(M):
         otype = norm_input.internal_outcomes[m]
         child_cfg = dataclasses.replace(config, outcome=otype,
-            num_categories=norm_input.internal_num_categories[m],
-            num_shared_trees=0,
-            num_trees_trt=config.num_trees_trt-config.num_shared_trees)
+            num_categories=norm_input.internal_num_categories[m])
         y_m = norm_input.y_prepared[m].ravel()
         obs_m = norm_input.obs_masks[m].ravel()
         offset_m = norm_input.offset_[m]
@@ -192,10 +186,6 @@ def init_multi_longbet(
             mesh=mesh,
             **kwargs,
         )
-        if config.num_shared_trees:
-            precision = st.leaf_prior_cov_inv_nu / (1-config.shared_variance_fraction)
-            st = eqx.tree_at(lambda s: (s.leaf_prior_cov_inv_nu, s.forest_nu.leaf_prior_cov_inv),
-                             st, (precision, precision))
         child_states.append(st)
 
     gamma_loadings = jnp.zeros((M, M), dtype=jnp.float32)
@@ -207,13 +197,18 @@ def init_multi_longbet(
         sur_active=config.sur_active,
         sur_prior_var=float(config.sur_prior_var),
         continuous_mask=continuous_mask,
-        shared_forest=(init_shared_forest(config, M, z_vec.size, max_split_nu)
-                       if config.num_shared_trees else None),
     )
 
+    if config.tempering_levels > 1 and (num_chains is None or num_chains % config.tempering_levels):
+        raise ValueError("tempering needs num_chains * tempering_levels replicas")
     if num_chains is not None and num_chains > 1:
         multi_state = broadcast_multi_to_chains(
             multi_state, int(num_chains), key=init_key
         )
 
+    if config.tempering_levels > 1:
+        from longbet._tempering import ladder_temperatures, multi_set_temperature
+        multi_state = multi_set_temperature(
+            multi_state, ladder_temperatures(multi_state.num_chains, config.tempering_levels,
+                                             config.tempering_beta_min))
     return multi_state

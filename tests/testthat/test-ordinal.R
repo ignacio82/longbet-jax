@@ -119,7 +119,6 @@ test_that("ordinal multi counts and shared parent/child rehydration agree", {
     bad_opts <- opts; bad_opts$num_categories <- bad
     expect_error(do.call(longbet_multi,c(list(y=yy,x=d$x,z=d$z),bad_opts)),"num_categories|Nonordinal")
   }
-  opts$num_shared_trees <- 1L
   fit <- do.call(longbet_multi,c(list(y=yy,x=d$x,z=d$z),opts))
   expect_equal(fit$order,c(2L,3L,4L,1L))
   expect_identical(fit$num_categories,opts$num_categories)

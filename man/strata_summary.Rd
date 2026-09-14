@@ -9,7 +9,8 @@ strata_summary(object, horizon = NULL)
 \arguments{
 \item{object}{A `longbet_conditional_pred` object from [predict_conditional()].}
 
-\item{horizon}{Optional exposure horizon index. Defaults to the first available horizon.}
+\item{horizon}{Optional exposure horizon, matching the \code{horizon} column.
+Defaults to the first available horizon.}
 }
 \description{
 Print human-readable summary of principal strata estimates

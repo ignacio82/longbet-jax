@@ -43,10 +43,6 @@ BCF_REDUCTION = dict(
     num_chains=1,             # a cross-section needs no convergence story
     random_intercept=False,   # no panel structure
     sample_beta=False,        # beta stays at its initial value of 1
-    sample_alpha=False,
-    adaptive_coding=True,     # the b0/b1 contrast is BCF's coding
-    split_time_trt=False,     # no exposure index to split on when T = 1
-    ridge_move=False,         # nothing to traverse with beta fixed
     standardize=False,
     random_seed=42,
 )
@@ -70,7 +66,10 @@ def _fit_longbet(x, y, z, pi):
         y=y[:, None], x=x, z=z[:, None],
         t=np.array([1.0], dtype=np.float32), ps=pi,
     )
-    pred = model.predict(x=x, z=z[:, None], t=np.array([1.0], dtype=np.float32), ps=pi)
+    # The effect is reported for the schedule passed to predict (zero before
+    # treatment), so ask for everyone treated to read tau(x) for every unit.
+    pred = model.predict(x=x, z=np.ones((len(x), 1), dtype=np.float32),
+                         t=np.array([1.0], dtype=np.float32), ps=pi)
     return model, pred
 
 
@@ -95,9 +94,8 @@ def test_beta_is_held_fixed_in_the_reduction():
     assert np.all(np.asarray(model.trace.gamma) == 0.0), (
         "random_intercept=False must leave gamma at zero"
     )
-    # Adaptive coding is the reduction's contrast, so b0 and b1 must move.
-    assert np.std(np.asarray(model.trace.b1)) > 0
-    assert not np.allclose(np.asarray(model.trace.b0), np.asarray(model.trace.b1))
+    # Treatment-only coding: y = mu(x) + tau(x) z, which is BCF's contrast.
+    assert np.all(np.asarray(model.trace.b0) == 0) and np.all(np.asarray(model.trace.b1) == 1)
     # The treatment forest cannot see the exposure index in this reduction.
     assert not {b.name: b for b in model.design_.blocks}["s"].nu_visible
 

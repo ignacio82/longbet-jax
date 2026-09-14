@@ -46,10 +46,12 @@ from bartz.mcmcstep import State, Wishart
 from bartz.mcmcstep import step as bartz_step
 from bartz.mcmcstep._step import step_z
 
+from longbet._change_move import change_step
+from longbet._regrow_move import regrow_step
 from longbet._gp import sample_beta_gp
 from longbet._ordinal import sample_cutpoints, sample_cutpoints_marginalized, sample_ordinal_latents
 from longbet._forest_cache import refresh_prec_tree, current_forest_fit
-from longbet._shared_forest import enable_x64
+from longbet._x64 import enable_x64
 from longbet._ridge import ridge_scale_step
 from longbet._scales import compute_treatment_scale_attrs
 from longbet._state import LongBetState, chain_filter_spec
@@ -83,13 +85,43 @@ def _sample_inv_gamma(
     return (rate / g).astype(jnp.float32)
 
 
-@partial(jax.jit, static_argnames=('shared_treatment',))
+def _tempered_single_step(key: Key[Array, ''], state: LongBetState) -> LongBetState:
+    """One sweep against ``p(theta) L(theta)^beta`` with ``beta = state.temperature``.
+
+    Every mean, latent and coefficient update runs with the per-cell conditional
+    precision ``beta / sigma2``; a continuous outcome's ``sigma2`` is then drawn
+    from its tempered conditional ``IG(a + beta m / 2, b + beta SSR / 2)``. See
+    ``longbet._tempering``.
+    """
+    beta = jnp.asarray(state.temperature, dtype=jnp.float32)
+    prec = jnp.where(state.obs_mask, beta / state.sigma2, 0.0).astype(jnp.float32)
+    k_step, k_sig = random.split(key)
+    new = longbet_single_step(k_step, state, prec)
+    if state.num_categories < 2:
+        m_obs = jnp.sum(state.obs_mask.astype(jnp.float32))
+        ssr = jnp.sum(jnp.square(jnp.where(new.obs_mask, new.resid, 0.0)))
+        sigma2_new = _sample_inv_gamma(
+            k_sig,
+            jnp.float32(state.sigma_prior_a) + 0.5 * beta * m_obs,
+            jnp.float32(state.sigma_prior_b) + 0.5 * beta * ssr,
+        )
+        error_cov_inv = eqx.tree_at(
+            lambda w: w.value, new.error_cov_inv, jnp.reciprocal(sigma2_new).astype(jnp.float32)
+        )
+        new = eqx.tree_at(lambda s: (s.sigma2, s.error_cov_inv), new, (sigma2_new, error_cov_inv))
+    return new
+
+
+#: Proposal standard deviation of ``log c`` in the beta-nu scale ridge move.
+RIDGE_PROPOSAL_SIGMA = 0.2
+
+
+@jax.jit
 @enable_x64(False)
 def longbet_single_step(
     key: Key[Array, ''],
     state: LongBetState,
     conditional_precision: Float32[Array, ' n'] | None = None,
-    *, shared_treatment: bool = False,
 ) -> LongBetState:
     """Execute one Gibbs sweep on a single chain.
 
@@ -100,8 +132,8 @@ def longbet_single_step(
 
     Sweep order (plan section 4.9)::
 
-        z (binary only) -> mu -> alpha -> nu -> beta -> b0,b1
-                        -> gamma -> sigma_gamma^2 -> sigma^2 -> ridge move
+        z (binary only) -> mu -> nu -> beta -> gamma -> sigma_gamma^2
+                        -> sigma^2 -> ridge move
 
     Any order is valid provided each draw conditions on current values; this one
     keeps ``R`` consistent with the least bookkeeping and puts the variance draws
@@ -116,10 +148,6 @@ def longbet_single_step(
     must update it from the structural innovation, not this pseudo-residual.
     None selects the scalar likelihood with its existing random-key schedule.
     Both paths refresh leaf caches when their observation weights change.
-    With ``shared_treatment=True``, ``nu_fit`` includes the caller's shared
-    ensemble while ``forest_nu`` holds only private trees. Backfitting changes
-    the private term; GP/coding/intercepts use the total. The caller must run
-    the ridge move on BOTH ensembles, so the scalar ridge move is skipped.
     """
     keys = random.split(key, 10)
 
@@ -240,20 +268,15 @@ def longbet_single_step(
     if conditional_attrs is not None:
         view_mu = refresh_prec_tree(view_mu)
     view_mu = bartz_step(keys[1], view_mu)
+    view_mu = change_step(random.fold_in(key, 7101), view_mu)
+    view_mu = regrow_step(random.fold_in(key, 7103), view_mu, 1)
     mu_fit = current_forest_fit(view_mu.forest)
     R = jnp.where(obs_mask, R-alpha*(mu_fit-state.mu_fit), 0.)
 
     # ------------------------------------------------------------------
     # 2. Prognostic scale alpha
     # ------------------------------------------------------------------
-    alpha_new = alpha
-    if state.sample_alpha:
-        u = jnp.where(obs_mask, mu_fit, 0.0)
-        e = jnp.where(obs_mask, R + alpha * mu_fit, 0.0)
-        prec = weighted_sum(jnp.square(u)) + 1.0 / state.sigma_alpha**2
-        mean = weighted_sum(u * e) / prec
-        alpha_new = mean + random.normal(keys[2], (), dtype=jnp.float32) * lax.rsqrt(prec)
-        R = jnp.where(obs_mask, R - (alpha_new - alpha) * mu_fit, 0.0)
+    alpha_new = alpha  # fixed at one; kept as a state field for the archive layout
 
     # ------------------------------------------------------------------
     # 3. Treatment forest nu
@@ -293,12 +316,13 @@ def longbet_single_step(
     )
 
     view_nu = refresh_prec_tree(view_nu)
-    private_before = (current_forest_fit(view_nu.forest) if shared_treatment
-                      else state.nu_fit)
+    private_before = state.nu_fit
     view_nu = bartz_step(keys[4], view_nu)
+    view_nu = change_step(random.fold_in(key, 7102), view_nu)
+    view_nu = regrow_step(random.fold_in(key, 7104), view_nu, 1)
     private_after = current_forest_fit(view_nu.forest)
     private_delta = private_after - private_before
-    nu_fit = state.nu_fit + private_delta if shared_treatment else private_after
+    nu_fit = private_after
     forest_nu = view_nu.forest
 
     # Apply the physical fit delta even on zero/negligible-weight cells. Avoid
@@ -336,28 +360,9 @@ def longbet_single_step(
     R = jnp.where(obs_mask, r_partial - d_vec * beta_expanded, 0.0)
 
     # ------------------------------------------------------------------
-    # 5. Adaptive coding b0, b1
+    # 5. Coding scales: fixed at b0 = 0, b1 = 1 (treatment-only coding)
     # ------------------------------------------------------------------
     b0_new, b1_new = state.b0, state.b1
-    if state.adaptive_coding:
-        g = beta_expanded * nu_fit
-        r_b = R + b_z * g
-        g_obs = jnp.where(obs_mask, g, 0.0)
-        r_b_obs = jnp.where(obs_mask, r_b, 0.0)
-        prior_prec = 1.0 / state.sigma_b**2
-
-        g0 = jnp.where(state.z_vec == 0.0, g_obs, 0.0)
-        prec_b0 = weighted_sum(jnp.square(g0)) + prior_prec
-        mean_b0 = weighted_sum(g0 * r_b_obs) / prec_b0
-        b0_new = mean_b0 + random.normal(keys[5], (), dtype=jnp.float32) * lax.rsqrt(prec_b0)
-
-        g1 = jnp.where(state.z_vec == 1.0, g_obs, 0.0)
-        prec_b1 = weighted_sum(jnp.square(g1)) + prior_prec
-        mean_b1 = weighted_sum(g1 * r_b_obs) / prec_b1
-        b1_new = mean_b1 + random.normal(keys[6], (), dtype=jnp.float32) * lax.rsqrt(prec_b1)
-
-        b_z_new = jnp.where(state.z_vec == 1.0, b1_new, b0_new)
-        R = jnp.where(obs_mask, r_b - b_z_new * g, 0.0)
 
     # ------------------------------------------------------------------
     # 6. Unit intercepts gamma_i and sigma_gamma^2
@@ -412,7 +417,7 @@ def longbet_single_step(
     # ------------------------------------------------------------------
     # 8. Metropolis move along the beta-nu scale ridge
     # ------------------------------------------------------------------
-    if state.ridge_move and state.sample_beta and not shared_treatment:
+    if state.sample_beta:
         beta_new, forest_nu, nu_fit = ridge_scale_step(
             random.fold_in(key, 888),
             beta_new,
@@ -420,7 +425,7 @@ def longbet_single_step(
             nu_fit,
             state.K_chol,
             state.leaf_prior_cov_inv_nu,
-            proposal_sigma=state.ridge_proposal_sigma,
+            proposal_sigma=RIDGE_PROPOSAL_SIGMA,
         )
 
     # ------------------------------------------------------------------
@@ -523,15 +528,16 @@ def longbet_step(key: Key[Array, ''], state: LongBetState) -> LongBetState:
     weighted-observation path does not accept a per-chain ``prec_scale``, and
     LongBet's treatment weights differ across chains by construction.
     """
+    sweep = _tempered_single_step if state.is_tempered else longbet_single_step
     if not state.has_chain_axis:
-        return longbet_single_step(key, state)
+        return sweep(key, state)
 
     spec = chain_filter_spec(state)
     per_chain, shared = eqx.partition(state, spec)
     keys = random.split(key, state.num_chains)
 
     def one(k: Key[Array, ''], p: Any) -> Any:
-        out = longbet_single_step(k, eqx.combine(p, shared))
+        out = sweep(k, eqx.combine(p, shared))
         # Return only the per-chain part, so vmap does not add a chain axis to
         # the shared arrays.
         return eqx.filter(out, spec)

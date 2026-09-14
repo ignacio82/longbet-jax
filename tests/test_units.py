@@ -79,9 +79,8 @@ def test_fit_by_differencing_equals_evaluate_forest():
     )
 
 
-@pytest.mark.parametrize("sample_alpha", [False, True])
 @pytest.mark.parametrize("binary", [False, True])
-def test_full_model_residual_invariant(sample_alpha, binary):
+def test_full_model_residual_invariant(binary):
     """After every sweep, ``resid == y - fitted`` on observed cells.
 
     This is the single strongest end-to-end check on the sweep's bookkeeping: it
@@ -106,7 +105,7 @@ def test_full_model_residual_invariant(sample_alpha, binary):
         obs_mask=jnp.asarray(obs),
         max_split_mu=jnp.full(P, 4, jnp.uint8),
         max_split_nu=jnp.full(P, 4, jnp.uint8),
-        config=LongBetConfig(num_trees_pr=4, num_trees_trt=4, sample_alpha=sample_alpha,
+        config=LongBetConfig(num_trees_pr=4, num_trees_trt=4,
                              outcome="binary" if binary else "continuous"),
         offset=-0.7 if binary else 0.0,
     )

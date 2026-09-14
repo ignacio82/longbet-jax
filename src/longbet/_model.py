@@ -464,8 +464,6 @@ class LongBet:
         -------
         self
         """
-        if self.config.num_shared_trees:
-            raise ValueError("num_shared_trees requires LongBetMulti; a scalar fit cannot share trees across outcomes.")
         self.multi_origin = None
         self.device_ = resolve_device(self.config.device)
         with jax.default_device(self.device_):
@@ -591,7 +589,8 @@ class LongBet:
         )
         X_unified = self.design_.build(raw)
 
-        num_chains = self.config.num_chains if self.config.num_chains > 1 else None
+        total_chains = self.config.num_chains * self.config.tempering_levels
+        num_chains = total_chains if total_chains > 1 else None
         self.state = init_longbet(
             X_unified=jnp.asarray(X_unified),
             y=jnp.asarray(y_proc),
@@ -618,6 +617,8 @@ class LongBet:
         )
         self.state = result.final_state
         self.trace = result.main_trace
+        self.swap_accepts_ = (None if result.swap_accepts is None
+                              else np.asarray(result.swap_accepts))
         if self.config.outcome == "ordinal":
             # Surface checked interval failures before returning a fitted model.
             jax.block_until_ready((self.state.z, self.trace.cutpoints))
@@ -725,20 +726,20 @@ class LongBet:
                 )
             )
 
-        # Calendar time: split_time_ps governs the prognostic forest.
-        # split_time_trt controls exposure splits, independently of calendar time.
+        # Calendar time: split_time_ps governs the prognostic forest and
+        # split_calendar_trt the treatment forest.
         blocks.append(
             integer_grid_block(
-                "t", "t", self.T_, mu_visible=cfg.split_time_ps, nu_visible=True
+                "t", "t", self.T_, mu_visible=cfg.split_time_ps,
+                nu_visible=cfg.split_calendar_trt,
             )
         )
-        # Exposure index: never visible to mu, and visible to nu only when
-        # split_time_trt is on. Turning it off removes the c(S) component of the
-        # beta-nu non-identification entirely.
+        # Exposure index: visible to neither forest. The trajectory beta_S
+        # carries the whole exposure profile; letting nu split on S would give
+        # the product beta_S * nu(x, S) an unidentified exposure-shape ridge.
         blocks.append(
             integer_grid_block(
-                "s", "s", self.S_max_ + 1, mu_visible=False,
-                nu_visible=cfg.split_time_trt,
+                "s", "s", self.S_max_ + 1, mu_visible=False, nu_visible=False,
             )
         )
         if "ps" in raw:
@@ -777,13 +778,11 @@ class LongBet:
 
         .. code::
 
-            tau_t(X_i, S) = b1 * beta_S * nu(X_i, S, t)
-                          - b0 * beta_0 * nu(X_i, 0,  t)
+            tau_t(X_i, S) = beta_S * nu(X_i, t)      for S >= 1, and 0 before treatment,
 
-        so the treatment forest is evaluated **twice**: once on the factual
-        exposure and once on a copy of the design with ``S = 0``. Under control
-        the exposure index is 0, not ``S``, so both the multiplier and the
-        forest's input change.
+        the exposure trajectory times the treatment forest. The treatment forest
+        never sees the exposure index, so one forest evaluation serves both
+        arms; ``muhats0`` is the untreated surface ``mu + gamma``.
 
         Parameters
         ----------
@@ -922,7 +921,6 @@ class LongBet:
                     kernel_type=self.config.kernel_type,
                     sigma_m=self.config.sigma_m,
                     gp_constant_mean=self.config.gp_constant_mean,
-                    jitter=self.config.gp_jitter,
                 )
             )
 
@@ -1035,8 +1033,11 @@ class LongBet:
             bz = np.where(z_vec[None, sl] == 1.0, b1, b0)
             g = gamma_flat[:, unit_idx[sl]] if has_gamma else 0.0
 
-            tau = (b1 * beta_S * nu_f - b0 * beta_0 * nu_0) * scale
-            mu0 = (alpha_d * mu_f + b0 * beta_0 * nu_0 + g) * scale + centre
+            # Treatment-only coding (b0 = 0, b1 = 1): the effect of being S
+            # periods into treatment is beta_S * nu, and zero before treatment.
+            s_active = (exposure_idx[sl] >= 1)[None, :]
+            tau = (b1 * beta_S * nu_f * s_active) * scale
+            mu0 = (alpha_d * mu_f + g) * scale + centre
             yhat = (alpha_d * mu_f + bz * beta_S * nu_f + g) * scale + centre
 
             # ATT sums by exposure time, accumulated rather than aligned into an

@@ -35,15 +35,15 @@ def _constant_state(y, observed, variance=1.0, **overrides):
         num_trees_pr=1, num_trees_trt=1,
         max_depth_pr=1, max_depth_trt=1,
         min_points_per_leaf_pr=1, min_points_per_leaf_trt=1,
-        sample_beta=False, adaptive_coding=False, random_intercept=False,
-        ridge_move=False, standardize=False, num_chains=1,
+        sample_beta=False, random_intercept=False,
+        standardize=False, num_chains=1,
     )
     cfg = dataclasses.replace(cfg, **overrides)
     state = init_longbet(
         X_unified=jnp.zeros((1, n), jnp.uint8),
         y=jnp.array(y, jnp.float32), unit_idx=jnp.zeros(n, jnp.int32),
         time_idx=jnp.arange(n), exposure_idx=jnp.zeros(n, jnp.int32),
-        z_vec=jnp.zeros(n), obs_mask=jnp.array(observed),
+        z_vec=jnp.ones(n), obs_mask=jnp.array(observed),
         max_split_mu=jnp.zeros(1, jnp.uint8),
         max_split_nu=jnp.zeros(1, jnp.uint8), config=cfg,
     )
@@ -153,7 +153,7 @@ def test_precision_refresh_never_builds_dense_membership_arrays():
 
 
 def test_fixed_beta_is_not_rescaled_by_ridge_move():
-    state = _constant_state(np.zeros(4), np.ones(4, bool), ridge_move=True)
+    state = _constant_state(np.zeros(4), np.ones(4, bool))
     state = eqx.tree_at(lambda s: s.beta, state, jnp.ones_like(state.beta))
     for i in range(20):
         state = longbet_single_step(jax.random.key(i), state)
@@ -165,7 +165,7 @@ def test_fixed_beta_is_not_rescaled_by_ridge_move():
 def test_chain_initialization_preserves_fixed_parameters(binary, num_chains):
     cfg = LongBetConfig(
         num_trees_pr=2, num_trees_trt=2, num_chains=num_chains,
-        sample_beta=False, adaptive_coding=False, random_intercept=False,
+        sample_beta=False, random_intercept=False,
         outcome="binary" if binary else "continuous",
     )
     state = init_longbet(
@@ -178,7 +178,7 @@ def test_chain_initialization_preserves_fixed_parameters(binary, num_chains):
         num_chains=num_chains, chain_key=jax.random.key(43),
     )
     np.testing.assert_array_equal(state.beta, 1)
-    np.testing.assert_array_equal(state.b0, 1)
+    np.testing.assert_array_equal(state.b0, 0)
     np.testing.assert_array_equal(state.b1, 1)
     np.testing.assert_array_equal(state.gamma, 0)
     if binary:

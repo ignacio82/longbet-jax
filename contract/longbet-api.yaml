@@ -27,7 +27,7 @@
 #
 # Adding a configuration option without touching this file fails the Python
 # test; exposing it in R with a different default fails the R test.
-version: "2.4.0"
+version: "3.0.0"
 
 # Config fields that are deliberately not part of the user-facing contract.
 internal:
@@ -38,7 +38,7 @@ arguments:
   - python_name: num_sweeps
     r_name: num_sweeps
     type: integer
-    default: 250
+    default: 1000
     expose_in_r: true
     description: Number of posterior draws saved per chain, after burn-in.
   - python_name: num_burnin
@@ -52,7 +52,7 @@ arguments:
   - python_name: n_skip
     r_name: n_skip
     type: integer
-    default: 2
+    default: 1
     expose_in_r: true
     description: >-
       Thinning interval; 1 saves every post-burn-in iteration. Thinning buys
@@ -158,12 +158,6 @@ arguments:
     default: "se"
     expose_in_r: true
     description: Kernel family; one of se, matern32, matern52, ar1.
-  - python_name: gp_jitter
-    r_name: gp_jitter
-    type: float
-    default: 1.0e-6
-    expose_in_r: true
-    description: Relative diagonal jitter on the kernel.
   - python_name: sigma_m
     r_name: sigma_m
     type: float
@@ -184,12 +178,24 @@ arguments:
     default: true
     expose_in_r: true
     description: Whether the prognostic forest may split on calendar time.
-  - python_name: split_time_trt
-    r_name: split_time_trt
+  - python_name: split_calendar_trt
+    r_name: split_calendar_trt
     type: boolean
     default: true
     expose_in_r: true
-    description: Whether the treatment forest may split on the exposure index.
+    description: Whether the treatment forest may split on calendar time; the exposure index is never split on, so FALSE gives the separable term beta_S * nu(x).
+  - python_name: tempering_levels
+    r_name: tempering_levels
+    type: integer
+    default: 1
+    expose_in_r: true
+    description: Parallel-tempering replicas per chain (1 = plain sampler); only the posterior replicas are retained. Scalar longbet() only.
+  - python_name: tempering_beta_min
+    r_name: tempering_beta_min
+    type: number
+    default: 0.05
+    expose_in_r: true
+    description: Inverse temperature of the hottest replica.
 
   # -- priors ----------------------------------------------------------------
   - python_name: random_intercept
@@ -213,27 +219,15 @@ arguments:
   - python_name: sigma_prior_a
     r_name: sigma_prior_a
     type: float
-    default: 0.0
+    default: 2.0
     expose_in_r: true
     description: Inverse-gamma shape for the error variance; 0 is the reference prior.
   - python_name: sigma_prior_b
     r_name: sigma_prior_b
     type: float
-    default: 0.0
-    expose_in_r: true
-    description: Inverse-gamma scale for the error variance.
-  - python_name: sigma_b
-    r_name: sigma_b
-    type: float
-    default: 0.7071067811865476
-    expose_in_r: true
-    description: Prior standard deviation of the adaptive coding weights.
-  - python_name: sigma_alpha
-    r_name: sigma_alpha
-    type: float
     default: 1.0
     expose_in_r: true
-    description: Prior standard deviation of the prognostic scale.
+    description: Inverse-gamma scale for the error variance.
 
   # -- outcome and moves -----------------------------------------------------
   - python_name: outcome
@@ -254,33 +248,6 @@ arguments:
     default: 5.0
     expose_in_r: true
     description: Positive finite ordered-normal cutpoint prior scale in latent probit units.
-  - python_name: sample_alpha
-    r_name: a_scaling
-    type: boolean
-    default: false
-    expose_in_r: true
-    description: Whether to sample the prognostic scale alpha.
-  - python_name: adaptive_coding
-    r_name: b_scaling
-    type: boolean
-    default: true
-    expose_in_r: true
-    description: >-
-      Whether to sample the adaptive coding weights b0, b1. On by default: this
-      is an exactly conjugate move along the global scale of the treatment term
-      and one of the two mechanisms that traverse the beta-nu ridge.
-  - python_name: ridge_move
-    r_name: ridge_move
-    type: boolean
-    default: true
-    expose_in_r: true
-    description: Whether to run the Metropolis move along the beta-nu scale ridge.
-  - python_name: ridge_proposal_sigma
-    r_name: ridge_proposal_sigma
-    type: float
-    default: 0.2
-    expose_in_r: true
-    description: Proposal standard deviation for log c in the ridge move.
   - python_name: standardize
     r_name: standardize
     type: boolean
@@ -317,24 +284,6 @@ arguments:
       Prior variance on SUR regression loadings Gamma. 0 disables SUR.
       Inert for single-outcome models.
 
-  - python_name: num_shared_trees
-    r_name: num_shared_trees
-    type: integer
-    default: 0
-    expose_in_r: true
-    description: >-
-      Shared treatment partitions with vector leaves. Replaces this many of
-      num_trees_trt, leaving at least one private tree per outcome. Zero disables
-      sharing. Nonzero values require LongBetMulti / longbet_multi.
-  - python_name: shared_variance_fraction
-    r_name: shared_variance_fraction
-    type: float
-    default: 0.5
-    expose_in_r: true
-    description: >-
-      Fixed prior variance fraction for shared treatment trees, strictly between
-      0 and 1. The remainder belongs to private treatment trees; total forest
-      variance remains one. Inert without sharing. Not a learned correlation.
 
 # Arguments accepted by the R front door that are not sampler configuration.
 r_only_arguments:
@@ -430,21 +379,14 @@ multi_api:
   description: >-
     Multiple continuous, binary and ordinal outcomes on a shared panel using full-precision
     triangular SUR, including downstream feedback into discrete latent responses.
-    Prognostic forests remain outcome-specific. Optional shared treatment
-    partitions have vector leaves and regularized private components.
+    All forests are outcome-specific; only the residual likelihood couples outcomes.
   sampler_semantics: "full_precision_sur_v1"
-  shared_sampler_semantics: "shared_private_sur_v1"
-  shared_format_version: 2
   ordinal_format_version: 3
   ordinal_schema_version: 1
-  shared_treatment_trace_layout: "private_then_shared"
   precision_cache_version: 1
   variance_prior_requirement: >-
-    Coupled fits (sur_active=true) containing continuous outcomes require
-    explicitly positive sigma_prior_a and sigma_prior_b on the working outcome
-    scale. Their improper reference prior is rejected at fit and archive load.
-    Scalar defaults, uncoupled fits and binary-only fits retain existing behavior.
-    Proper priors do not guarantee convergence.
+    Innovation-variance priors are proper by construction (positive inverse-gamma
+    parameters); the improper reference prior is not offered.
   inputs:
     y:
       python_types:
@@ -652,26 +594,28 @@ encouragement_api:
 encouragement_model_api:
   python_class: LongBetEncourage
   r_function: longbet_encourage
-  inference_version: encouragement_reduced_form_v1
-  archive_version: 1
+  engine: adoption_clock
+  inference_version: adoption_clock_v1
+  archive_version: 2
   constructor:
-    required: [first_stage]
+    required: []
     defaults: {config: null, outcome: continuous}
     sampler_overrides: config_kwargs
-    first_stage_choices: [lpm, probit]
     wrapper_default_priors: {sigma_prior_a: 2.0, sigma_prior_b: 1.0}
   r_fit:
-    required: ["y", d, z, x, first_stage]
-    defaults: {t: null, x_trt: null, outcome: continuous, config: {}, verbose: false, engine: longbet, direct_config: {}}
+    required: ["y", d, z, x]
+    defaults: {t: null, x_trt: null, outcome: continuous, config: {}, verbose: false}
   r_predict:
     required: [object]
-    defaults: {summary_only: true, groups: null, block_size: null, standardization: conditional, alpha: 0.05, min_ess: 400, max_rhat: 1.01, practical_threshold: null}
+    defaults: {summary_only: true, groups: null, weights: null, block_size: null, alpha: 0.05, min_ess: 400, max_rhat: 1.01, practical_threshold: null}
     variadic: "..."
   fit:
     required: ["y", d, z, x]
     defaults: {t: null, x_trt: null, key: null}
   predict:
-    defaults: {summary_only: true, groups: null, block_size: null, standardization: conditional, alpha: 0.05}
+    defaults: {summary_only: true, groups: null, weights: null, block_size: null, alpha: 0.05}
+  predict_conditional:
+    defaults: {x: null, z: null, t: null, alpha: 0.05, cace_stabilization: 0.02, monotonic_first_stage: true}
   diagnostics_defaults: {min_ess: 400, max_rhat: 1.01}
   posterior_methods:
     effects: {min_ess: 400, max_rhat: 1.01}
@@ -688,45 +632,46 @@ encouragement_model_api:
       Pointwise normal comparison of ITTs only. Withheld when any fit fails
       diagnostics, any estimate is unavailable, or fewer than 100 replications
       are requested. Not exact randomization inference or a test of IV assumptions.
-  target: all original study units with common equal weights in both equations
+  equations: >-
+    Outcome on the observed adoption clock (LongBet with treatment = adoption);
+    adoption as a discrete-time hazard on the offer clock (binary LongBet on the
+    at-risk set, cells after adoption masked, unit intercept as frailty). The
+    offer effects are composed from the two, integrating the frailty outside the
+    survival product with Gauss-Hermite quadrature.
+  target: all original study units with common equal weights, each with its own fitted intercepts
   groups: >-
     Fixed baseline labels; include overall all and each subgroup. Conditional
     subgroup arm-mean reference differs from the fixed-denominator HT estimator
     in encouragement_design_api. Missing-arm groups retain model predictions
     flagged as extrapolation, with unavailable reference contrasts.
-  standardization:
-    conditional: natural-scale contrasts holding each fitted unit-intercept draw fixed
-    population: >-
-      Integrates new normal unit intercepts for binary outcomes, using
-      Phi(eta/sqrt(1+sigma_gamma_squared)); different target from the finite-unit
-      reference, so model/reference comparisons are unavailable.
+  conditional_target: >-
+    predict_conditional describes a unit with the given covariate profile drawn
+    from the fitted population (both unit intercepts integrated out), for study
+    units and new cohorts alike.
   returns:
     draws: dictionary of itt_y, itt_d, wald; axes (group, horizon, chain, retained draw)
     table: tidy posterior means for ITTs, medians/quantiles, diagnostics and support
     reference: separate frequentist pointwise normal_ar confidence sets
     itt_covariance: empirical joint posterior covariance across groups, horizons and both ITTs
-    cell_summaries: natural-scale cell summaries available with summary_only true
-    cell_draws: natural-scale (N,T,chains*draws) arrays only when summary_only false
   ratio_rules: >-
     Preserve signed and near-zero denominators, never trim draws. Exactly-zero
     denominators yield NaN and withhold the ratio interval for that row. Ratio
     means and mean MCSE are absent. Diagnose endpoint quantiles, bulk/tail ESS,
     rank R-hat; wald() withholds ratios when either ITT or ratio diagnostics fail.
   calibration_status: not_established
-  covariance_limit: >-
-    SUR couples eligible innovations; unit-intercept priors remain independent
-    across equations. With binary Y and probit D, both innovation-loading rows
-    are zero: metadata records independent_binary regardless of config.sur.
-    Without opt-in shared treatment partitions, these equation posteriors are
-    independent. Shared partitions do not add binary innovation correlation.
+  assumptions: >-
+    Exclusion (the offer moves outcomes only through adoption); adoption timing
+    not confounded with outcome innovations given covariates and the unit
+    intercept; absorbing adoption. The design-based reference needs none of
+    these for the population offer effects.
   archive: >-
-    Versioned pickle-free NPZ contains nested joint model, original y/d/z/x/t
-    and optional baseline x_trt, design metadata and input digests. R stores raw
-    archive bytes and plain results, retaining no required live Python handles.
+    Versioned pickle-free NPZ contains both nested scalar archives, original
+    y/d/z/x/t and optional baseline x_trt, the configuration and input digests.
+    R stores raw archive bytes and plain results, retaining no live Python handles.
   scope: >-
     Complete individual single-wave randomization, absorbing adoption, complete
     panels and baseline covariates. Generalized designs below have reference
-    inference only. No structural treatment-clock model or automatic CACE label.
+    inference only.
 
 encouragement_design_api:
   python_class: EncouragementDesign

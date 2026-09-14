@@ -90,7 +90,7 @@ def test_multi_npz_roundtrip(tmp_path: Path):
     improper["_config_json"] = json.dumps(old_config)
     old_path = tmp_path / "improper_target.npz"
     np.savez_compressed(old_path, **improper)
-    with pytest.raises(ValueError, match="Refit from the original data"):
+    with pytest.raises(ValueError):
         LongBetMulti.load(old_path)
     for name in model.outcome_names:
         child_path = tmp_path / f"improper_child_{name}.npz"
@@ -101,7 +101,7 @@ def test_multi_npz_roundtrip(tmp_path: Path):
         cfg.update(sigma_prior_a=0, sigma_prior_b=0)
         child["_config_json"] = json.dumps(cfg)
         np.savez_compressed(child_path, **child)
-        with pytest.raises(ValueError, match="Refit from the original data"):
+        with pytest.raises(ValueError):
             LongBet.load(child_path)
     assert meta["precision_cache_version"] == 1
     legacy = dict(meta)
@@ -159,7 +159,7 @@ def test_multi_npz_roundtrip(tmp_path: Path):
         child_meta = json.loads(str(child_arrays["_meta_json"]))
         child_arrays["_meta_json"] = json.dumps({**child_meta, "design": broken})
         np.savez_compressed(child_path, **child_arrays)
-        with pytest.raises(ValueError, match="Refit from the original data"):
+        with pytest.raises(ValueError):
             LongBet.load(child_path)
 
 

@@ -81,7 +81,7 @@ def test_multi_contract_structure(contract):
     from longbet._io import PRECISION_CACHE_VERSION
     assert m_api.get("sampler_semantics") == SAMPLER_SEMANTICS
     assert m_api.get("precision_cache_version") == PRECISION_CACHE_VERSION
-    assert "explicitly positive sigma_prior_a and sigma_prior_b" in m_api["variance_prior_requirement"]
+    assert "proper by construction" in m_api["variance_prior_requirement"]
     assert "inputs" in m_api
     assert "fit_returns" in m_api
     assert "predict_returns" in m_api
@@ -191,7 +191,7 @@ def test_encouragement_model_contract(contract):
         assert init.parameters[key].default is inspect.Parameter.empty
     for key, value in api["constructor"]["defaults"].items():
         assert init.parameters[key].default == value
-    model = cls(first_stage="lpm")
+    model = cls()
     for key, value in api["constructor"]["wrapper_default_priors"].items():
         assert getattr(model.config, key) == value
     for method in ("fit", "predict", "bootstrap_comparison"):

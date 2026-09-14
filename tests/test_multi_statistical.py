@@ -22,8 +22,7 @@ from longbet import LongBetConfig, LongBetMulti, outcome_correlation
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("shared_trees", [0, 5])
-def test_mixed_three_outcome_sign_changing_recovery(shared_trees):
+def test_mixed_three_outcome_sign_changing_recovery():
     """Learn benefits AND harms from observed covariates in a randomized panel.
 
     This high-signal regression test is not the chapter DGP or a calibration
@@ -56,7 +55,6 @@ def test_mixed_three_outcome_sign_changing_recovery(shared_trees):
         sigma_prior_a=2, sigma_prior_b=1,
         num_burnin=600, num_sweeps=120, n_skip=2, num_chains=2,
         num_trees_pr=10, num_trees_trt=10, max_depth_pr=5, max_depth_trt=5,
-        num_shared_trees=shared_trees,
         min_points_per_leaf_pr=5, min_points_per_leaf_trt=5,
         lambda_knl=2, random_seed=314159, device="cpu",
     )

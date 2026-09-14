@@ -215,13 +215,6 @@ def load_npz(
         )
     _require_current_precision_cache(meta)
     cutpoints = _validate_scalar_ordinal(data, config, meta) if config.outcome == "ordinal" else None
-    origin = meta.get("multi_origin")
-    if origin is not None:
-        # Extracting one marginal must not bypass validation of its joint target.
-        # Older child archives omit the parent's outcome types, so require a
-        # proper prior unless independence is explicitly recorded in config.
-        config.validate_multi_variance_prior(
-            tuple(origin.get("outcomes", ("continuous", "continuous"))))
     meany = float(meta.pop("meany", 0.0))
     sdy = float(meta.pop("sdy", 1.0))
     has_chains = bool(meta.pop("has_chains", np.asarray(data["beta"]).ndim > 2))

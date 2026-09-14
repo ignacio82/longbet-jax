@@ -15,8 +15,6 @@ predict_conditional(object, ...)
   alpha = 0.05,
   cace_stabilization = 0.02,
   monotonic_first_stage = TRUE,
-  cace_shrinkage = "adaptive",
-  shrinkage_lambda = 1,
   budget = NULL,
   capacity = NULL,
   ranking_metric = "expected_net_value",
@@ -25,7 +23,7 @@ predict_conditional(object, ...)
 }
 \arguments{
 \item{object}{A fitted \code{longbet_encourage} object.}
-\item{new_x}{Optional baseline covariates for new or in-sample units (matrix or 2D array).}
+\item{new_x}{Optional baseline covariates for new units, N_new by P; NULL uses the study units' profiles.}
 \item{new_z}{Optional counterfactual encouragement matrix [N x T]. Defaults to 1 for post-treatment periods.}
 \item{t}{Optional calendar time vector; defaults to the fitted calendar.}
 \item{cost}{Optional per-unit intervention cost for policy decision analysis.}
@@ -33,8 +31,6 @@ predict_conditional(object, ...)
 \item{alpha}{Tail probability for credible intervals (default 0.05 for 95\% intervals).}
 \item{cace_stabilization}{Small ridge regularizer to prevent division-by-zero instability in CACE posterior draws (default 0.02).}
 \item{monotonic_first_stage}{If TRUE (default), enforces non-negative first-stage compliance.}
-\item{cace_shrinkage}{Shrinkage mode for CACE: "adaptive", "ridge", or "none".}
-\item{shrinkage_lambda}{Multiplier for adaptive shrinkage strength (default 1.0).}
 \item{budget}{Optional total monetary budget constraint on encouragement.}
 \item{capacity}{Optional integer cap on the maximum number of accounts targeted.}
 \item{ranking_metric}{Prioritization metric for resource-constrained selection.}

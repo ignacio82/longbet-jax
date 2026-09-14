@@ -16,9 +16,10 @@
 
 Both forests split on **one** binned predictor matrix; which columns each may
 use is controlled by its own ``max_split`` vector, with a zero entry blocking a
-column.  That is how ``nu`` is denied the propensity score, how ``mu`` is denied
-the exposure index, and how ``split_time_trt=False`` is implemented -- without a
-second copy of a matrix that dominates device memory.
+column.  That is how ``nu`` is denied the propensity score and the exposure
+index, how ``mu`` is denied the exposure index, and how ``split_calendar_trt``
+is implemented -- without a second copy of a matrix that dominates device
+memory.
 
 The layout is recorded as an ordered list of :class:`Block`s, persisted with the
 model, and replayed by ``predict``.  Rebuilding from the same spec is what makes

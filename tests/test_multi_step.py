@@ -46,10 +46,7 @@ def test_residual_protocol_and_binary_sigma2():
         num_trees_trt=3,  # unequal tree counts
         sur=True,
         sur_prior_var=1.0,
-        sample_alpha=True,
-        adaptive_coding=True,
         random_intercept=True,
-        ridge_move=True,
     )
 
     norm = normalize_multi_inputs(

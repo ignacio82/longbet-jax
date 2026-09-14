@@ -28,17 +28,15 @@
   reticulate::import("longbet", convert = FALSE)$LongBetEncourage$load(path)
 }
 
-.encouragement_config_args <- function(config, lb, direct = FALSE) {
+.encouragement_config_args <- function(config, lb) {
   if (!is.list(config) || (length(config) &&
       (is.null(names(config)) || anyNA(names(config)) ||
        any(!nzchar(names(config))) || anyDuplicated(names(config))))) {
     stop("config must be a list of uniquely named sampler options.", call. = FALSE)
   }
-  prototype <- if (direct) lb$DirectSmoothConfig() else lb$LongBetConfig()
-  defaults <- .encouragement_plain(reticulate::import("dataclasses")$asdict(prototype))
+  defaults <- .encouragement_plain(reticulate::import("dataclasses")$asdict(lb$LongBetConfig()))
   if (any(!names(config) %in% names(defaults)) || "outcome" %in% names(config)) {
-    stop(if (direct) "direct_config names must be DirectSmoothConfig options." else
-         "config names must be LongBetConfig options; set outcome separately.", call. = FALSE)
+    stop("config names must be LongBetConfig options; set outcome separately.", call. = FALSE)
   }
   # R's ordinary numeric literals are doubles. Respect Python integer fields
   # without silently rounding noninteger values or maintaining a second config.
@@ -56,11 +54,17 @@
   config
 }
 
-#' Joint reduced forms for a randomized encouragement experiment
+#' The adoption-clock model for a randomized encouragement experiment
 #'
-#' Fits the outcome and actual adoption jointly on assigned encouragement using
-#' the Python engine. Choose the LPM or probability-scale probit first stage
-#' explicitly; calibration has not established a preferred default.
+#' Fits two LongBet equations and composes them: the outcome on the observed
+#' adoption clock (periods since adoption, both arms contributing adoption
+#' events) and adoption as a discrete-time hazard on the offer clock, with the
+#' unit intercept of the hazard acting as a frailty. The offer's effects on the
+#' outcome and on adoption follow by composition, integrating the frailty
+#' outside the survival product. This uses the exclusion restriction and
+#' assumes adoption timing is not confounded with the outcome innovations given
+#' covariates and the unit intercept; the design-based reference returned by
+#' `predict()` needs neither and is the check on the population offer effects.
 #'
 #' @param y Complete outcome matrix, `[N x T]`.
 #' @param d,z Actual adoption and assigned encouragement, complete absorbing
@@ -68,54 +72,29 @@
 #' @param x Baseline covariates, `[N x P]`.
 #' @param t Increasing calendar vector with whole-unit gaps; defaults to `1:T`.
 #' @param x_trt Optional baseline treatment-forest covariates.
-#' @param first_stage Required choice, `"lpm"`, `"probit"`, or `"hazard"`.
-#' @param outcome `"continuous"` or `"binary"` for `y`.
-#' @param config Named list of Python `LongBetConfig` sampler options. With no
-#'   variance options supplied, the wrapper uses proper IG(2,1) innovation priors.
-#'   Explicit improper innovation priors are rejected. Other sampler defaults
-#'   follow `longbet()`. Set `num_chains`, `num_burnin`, `num_sweeps`, and
+#' @param outcome `"continuous"` or `"binary"` for `y`; adoption is always a
+#'   binary hazard.
+#' @param config Named list of Python `LongBetConfig` sampler options applied to
+#'   both equations. Set `num_chains`, `num_burnin`, `num_sweeps` and
 #'   `random_seed` here; convergence still requires checking.
 #' @param verbose Whether to print a fitting message.
-#' @param engine `"longbet"`, `"direct_smooth"`, or `"orthogonal_iv"`. The direct-smooth
-#'   uses Gaussian smooth stump leaves. The orthogonal_iv uses two-stage orthogonalized BCF.
-#' @param direct_config Named list of `DirectSmoothConfig` forest and prior
-#'   options for `engine = "direct_smooth"`. Set `correlated_intercepts = TRUE`
-#'   to estimate a covariance between the two equations' unit intercepts.
 #' @return A `longbet_encourage` object containing a versioned raw archive,
 #'   metadata and configuration, with no live Python handles. The archive
 #'   includes original outcomes, adoption, assignment and covariates so prediction
 #'   replays the same units and target. It can be saved using `saveRDS()`.
-#' @details Both ITTs average over all original study units with equal weights.
-#'   Binary contrasts are probability differences. The Wald ratio is not
-#'   automatically CACE; exclusion, monotonicity, relevance and appropriate
-#'   adoption-history assumptions are additional requirements. For
-#'   `engine = "longbet"`, SUR couples
-#'   innovations when a continuous equation is present; unit-intercept priors
-#'   are independent across equations. With binary Y and a probit first stage,
-#'   both innovation-loading rows are fixed at zero, so `sur = TRUE` does not
-#'   couple the innovations. Such a fit is independent across equations by
-#'   default. Optional shared treatment trees can couple forest uncertainty,
-#'   but do not create correlated binary innovations or unit intercepts.
+#' @details Both ITTs average over all original study units with equal weights
+#'   and each unit's own fitted intercepts. Binary contrasts are probability
+#'   differences. The Wald ratio is not automatically CACE; exclusion,
+#'   monotonicity, relevance and appropriate adoption-history assumptions are
+#'   additional requirements.
 #' @export
 longbet_encourage <- function(y, d, z, x, t = NULL, x_trt = NULL,
-                             first_stage, outcome = "continuous",
-                             config = list(), verbose = FALSE,
-                             engine = "longbet", direct_config = list()) {
-  if (missing(first_stage)) stop("Choose first_stage = 'lpm', 'probit', or 'hazard' explicitly.", call. = FALSE)
-  first_stage <- match.arg(first_stage, c("lpm", "probit", "hazard"))
+                             outcome = "continuous", config = list(), verbose = FALSE) {
   outcome <- match.arg(outcome, c("continuous", "binary"))
-  engine <- match.arg(engine, c("longbet", "direct_smooth", "orthogonal_iv"))
   lb <- longbet_py()
   options <- .encouragement_config_args(config, lb)
-  direct_options <- .encouragement_config_args(direct_config, lb, direct = TRUE)
-  if (engine != "direct_smooth" && length(direct_options)) {
-    stop("direct_config requires engine = 'direct_smooth'.", call. = FALSE)
-  }
-  backend <- do.call(lb$LongBetEncourage,
-                    c(list(first_stage = first_stage, outcome = outcome, engine = engine,
-                           direct_config = if (engine == "direct_smooth")
-                             do.call(lb$DirectSmoothConfig, direct_options) else NULL), options))
-  if (isTRUE(verbose)) message("Fitting joint encouragement reduced forms.")
+  backend <- do.call(lb$LongBetEncourage, c(list(outcome = outcome), options))
+  if (isTRUE(verbose)) message("Fitting the outcome on the adoption clock and the adoption hazard on the offer.")
   backend$fit(y = as.matrix(y), d = as.matrix(d), z = as.matrix(z), x = as.matrix(x),
              t = if (is.null(t)) NULL else as.numeric(t),
              x_trt = if (is.null(x_trt)) NULL else as.matrix(x_trt))
@@ -132,21 +111,18 @@ longbet_encourage <- function(y, d, z, x, t = NULL, x_trt = NULL,
 
 #' Predict common-population encouragement effects
 #'
-#' With the direct-smoothing engine, draws are conditional-mean assignment
-#' contrasts averaged over observed study units. No extra residual noise or
-#' realized finite-population counterfactual imputation is added. The prediction
-#' metadata records this target. Re-predict saved fits to replace earlier
-#' direct-engine summaries that added unsupported imputation noise.
+#' Every study unit is evaluated under both schedules (offered from the launch
+#' period onward, never offered) with its own fitted intercepts, so the target
+#' is the finite study population that the design-based reference describes.
 #'
 #' @param object A fitted `longbet_encourage` object, including one read by
 #'   `readRDS()` in another session.
-#' @param summary_only Avoid retaining full unit/period/draw arrays. Aggregate
-#'   ITT and ratio draws are always retained.
+#' @param summary_only Kept for API symmetry; the standardized draws are small
+#'   and always retained.
 #' @param groups Optional prespecified baseline group labels, length `N`.
-#' @param block_size Optional positive integer cells evaluated per block.
-#' @param standardization `"conditional"` retains each fitted unit intercept;
-#'   `"population"` integrates a fresh normal intercept and has a different
-#'   target from the finite-study-unit reference.
+#' @param weights Optional fixed nonnegative unit weights, normalized within each
+#'   group; they must not depend on post-encouragement quantities.
+#' @param block_size Optional positive integer number of units composed per block.
 #' @param alpha Tail probability for pointwise intervals.
 #' @param min_ess,max_rhat Diagnostic thresholds; passing is not a coverage claim.
 #' @param practical_threshold Optional positive adoption risk difference for a
@@ -154,16 +130,15 @@ longbet_encourage <- function(y, d, z, x, t = NULL, x_trt = NULL,
 #' @param ... Reserved; unsupported arguments raise an error.
 #' @return A plain-R `longbet_encourage.pred` list with `effects`, `reference`,
 #'   `wald`, `wald_unchecked`, `first_stage`, `comparison`, `diagnostics`, `draws`,
-#'   `cell_draws`, `cell_summaries`, `weights`, group information and metadata.
+#'   `weights`, group information and metadata.
 #'   Draw arrays retain axes `(group, horizon, chain, retained_draw)`.
-#'   Cell arrays have axes `(unit, period, chain-major draw)` when requested.
 #'   Wald summaries use medians, never a default ratio mean. `wald` withholds
 #'   unconverged intervals; `wald_unchecked` allows inspection of those summaries.
 #'   The `reference` contains separate normal Fieller/Anderson--Rubin-style
 #'   confidence sets with infinite endpoints and unavailable cases preserved.
 #' @export
 predict.longbet_encourage <- function(object, summary_only = TRUE, groups = NULL,
-                                      block_size = NULL, standardization = "conditional",
+                                      weights = NULL, block_size = NULL,
                                       alpha = 0.05, min_ess = 400, max_rhat = 1.01,
                                       practical_threshold = NULL, ...) {
   dots <- list(...)
@@ -182,8 +157,8 @@ predict.longbet_encourage <- function(object, summary_only = TRUE, groups = NULL
   if (is.factor(groups)) groups <- as.character(groups)
   engine <- .encouragement_load(object)
   pred <- engine$predict(summary_only = summary_only, groups = groups,
-                         block_size = block_size, standardization = standardization,
-                         alpha = alpha)
+                         weights = if (is.null(weights)) NULL else as.numeric(weights),
+                         block_size = block_size, alpha = alpha)
   standardized <- pred$standardized
   covariance <- pred$itt_covariance()
   structure(list(
@@ -199,8 +174,6 @@ predict.longbet_encourage <- function(object, summary_only = TRUE, groups = NULL
     draws = .encouragement_plain(pred$draws),
     itt_covariance = .encouragement_plain(covariance$to_numpy()),
     itt_covariance_index = .encouragement_plain(covariance$index$to_frame(index = FALSE)),
-    cell_draws = .encouragement_plain(standardized$cell_draws),
-    cell_summaries = .encouragement_plain(standardized$cell_summaries),
     weights = .encouragement_plain(standardized$weights),
     group_labels = unlist(.encouragement_plain(standardized$group_labels), use.names = FALSE),
     group_counts = .encouragement_plain(standardized$group_counts),
@@ -249,8 +222,8 @@ encouragement_comparison <- function(pred) {
 
 #' @export
 print.longbet_encourage <- function(x, ...) {
-  cat(sprintf("LongBet encouragement model: %s outcome, %s first stage\n",
-              x$metadata$outcome, x$metadata$first_stage))
+  cat(sprintf("LongBet encouragement model (adoption clock): %s outcome\n",
+              x$metadata$outcome))
   cat(sprintf("  %d study units, %d periods; posterior calibration not established\n",
               x$metadata$n_units, x$metadata$n_periods))
   invisible(x)
@@ -388,26 +361,25 @@ design_encouragement_effects <- function(y, d, z, t = NULL, design = NULL,
 
 #' Predict conditional encouragement effects and business decisions
 #'
-#' Evaluates the fitted LongBet model to produce unit-level Conditional
-#' Intent-to-Treat on the outcome (CITT_Y), adoption compliance (CITT_D),
-#' and conditional CACE, along with risk-aware decision metrics.
-#' Supports predicting out-of-sample on new units.
+#' Unit-level offer effects on the outcome (CITT_Y) and on adoption (CITT_D),
+#' their ratio (CACE), principal strata and risk-aware decision metrics, for the
+#' study units or a new cohort. Each unit is described as a unit with its
+#' covariate profile drawn from the fitted population: both unit intercepts are
+#' integrated out, so the same rule applies to study and new units.
 #'
 #' @param object A fitted `longbet_encourage` object.
 #' @param new_x Optional baseline covariates matrix for new units, `[N_new x P]`.
-#'   If NULL, evaluates on the original training units.
+#'   If NULL, evaluates the covariate profiles of the study units.
 #' @param new_z Optional counterfactual encouragement schedule, `[N_new x T]`.
 #'   If NULL, assumes encouragement is assigned from the encouragement start period onward.
 #' @param t Optional calendar time vector; defaults to the fitted calendar.
 #' @param cost Optional positive scalar per-unit encouragement cost.
 #' @param hurdle Decision certainty hurdle in (0, 1), default 0.50 (risk neutral).
-#' @param alpha Significance level for credible intervals (default 0.05 for 90% CIs).
-#' @param cace_stabilization Denominator regularization parameter for CACE (default 0.02).
-#' @param ... Reserved for future expansion.
-#' @param monotonic_first_stage If TRUE (default), enforces non-negative first-stage compliance.
-#' @param cace_shrinkage Shrinkage mode for CACE: `"adaptive"` (default Empirical Bayes /
-#'   James-Stein shrinkage toward population CACE), `"ridge"`, or `"none"`.
-#' @param shrinkage_lambda Multiplier for adaptive shrinkage strength (default 1.0).
+#' @param alpha Tail probability for credible intervals (default 0.05 for 95% intervals).
+#' @param cace_stabilization Positive floor added to the adoption contrast in the
+#'   draw-wise CACE ratio (default 0.02).
+#' @param monotonic_first_stage If TRUE (default), clips the adoption contrast at
+#'   zero (no defiers).
 #' @param budget Optional total monetary budget constraint on encouragement.
 #' @param capacity Optional integer cap on the maximum number of accounts targeted.
 #' @param ranking_metric Prioritization metric for resource-constrained selection:
@@ -426,19 +398,16 @@ predict_conditional.longbet_encourage <- function(object, new_x = NULL, new_z = 
                                                   cost = NULL, hurdle = 0.50, alpha = 0.05,
                                                   cace_stabilization = 0.02,
                                                   monotonic_first_stage = TRUE,
-                                                  cace_shrinkage = "adaptive",
-                                                  shrinkage_lambda = 1.0,
                                                   budget = NULL, capacity = NULL,
                                                   ranking_metric = "expected_net_value", ...) {
+  .reject_unsupported(...)
   engine <- .encouragement_load(object)
   x_py <- if (is.null(new_x)) NULL else reticulate::r_to_py(as.matrix(new_x))
   z_py <- if (is.null(new_z)) NULL else reticulate::r_to_py(as.matrix(new_z))
   t_py <- if (is.null(t)) NULL else reticulate::r_to_py(as.numeric(t))
   pred <- engine$predict_conditional(
     x = x_py, z = z_py, t = t_py, alpha = alpha, cace_stabilization = cace_stabilization,
-    monotonic_first_stage = monotonic_first_stage,
-    cace_shrinkage = cace_shrinkage,
-    shrinkage_lambda = shrinkage_lambda
+    monotonic_first_stage = monotonic_first_stage
   )
 
   citt_y_draws <- .encouragement_plain(pred$citt_y$draws)
@@ -578,7 +547,9 @@ knapsack_policy <- function(pred, cost, budget = NULL, capacity = NULL,
 #' Estimate principal strata probabilities and counts (Compliers, Never-Takers, Always-Takers)
 #'
 #' @param object A `longbet_conditional_pred` object from [predict_conditional()].
-#' @param horizon Optional 0-based horizon index. If NULL (default), returns all horizons.
+#' @param horizon Optional exposure horizon to keep, matching the `horizon` column
+#'   (1 is the first post-encouragement period when periods are unit-spaced).
+#'   If NULL (default), returns all horizons.
 #' @return A data.frame with columns `period`, `horizon`, `stratum`, `prob_mean`, `prob_median`,
 #'   `prob_lower`, `prob_upper`, `count_mean`, `count_median`, `count_lower`, `count_upper`, `n_total`.
 #' @export
@@ -601,7 +572,8 @@ principal_strata.longbet_conditional_pred <- function(object, horizon = NULL) {
 #' Print human-readable summary of principal strata estimates
 #'
 #' @param object A `longbet_conditional_pred` object from [predict_conditional()].
-#' @param horizon Optional exposure horizon index. Defaults to the first available horizon.
+#' @param horizon Optional exposure horizon, matching the `horizon` column.
+#'   Defaults to the first available horizon.
 #' @export
 strata_summary <- function(object, horizon = NULL) {
   UseMethod("strata_summary")
@@ -622,13 +594,14 @@ strata_summary.longbet_conditional_pred <- function(object, horizon = NULL) {
   }
   p_val <- sub$period[1]
   n_units <- sub$n_total[1]
+  level <- if (is.numeric(object$alpha) && length(object$alpha) == 1L) 100 * (1 - object$alpha) else 95
   cat(sprintf("Principal Strata Estimates at Horizon %s (Period %.2f, N = %d):\n", target_h, p_val, n_units))
   for (i in seq_len(nrow(sub))) {
     r <- sub[i, ]
     st <- gsub("_", "-", tools::toTitleCase(as.character(r$stratum)))
-    cat(sprintf("  - %-13s: %5.1f%% (95%% CI: [%.1f%%, %.1f%%])  --  ~%.1f units (95%% CI: [%.1f, %.1f])\n",
-                st, r$prob_mean * 100, r$prob_lower * 100, r$prob_upper * 100,
-                r$count_mean, r$count_lower, r$count_upper))
+    cat(sprintf("  - %-13s: %5.1f%% (%g%% CI: [%.1f%%, %.1f%%])  --  ~%.1f units (%g%% CI: [%.1f, %.1f])\n",
+                st, r$prob_mean * 100, level, r$prob_lower * 100, r$prob_upper * 100,
+                r$count_mean, level, r$count_lower, r$count_upper))
   }
   c_row <- sub[sub$stratum == "complier", ]
   if (nrow(c_row) > 0) {

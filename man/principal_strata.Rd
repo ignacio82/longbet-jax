@@ -9,7 +9,9 @@ principal_strata(object, horizon = NULL)
 \arguments{
 \item{object}{A `longbet_conditional_pred` object from [predict_conditional()].}
 
-\item{horizon}{Optional 0-based horizon index. If NULL (default), returns all horizons.}
+\item{horizon}{Optional exposure horizon to keep, matching the \code{horizon} column
+(1 is the first post-encouragement period when periods are unit-spaced).
+If NULL (default), returns all horizons.}
 }
 \value{
 A data.frame with columns `period`, `horizon`, `stratum`, `prob_mean`, `prob_median`,

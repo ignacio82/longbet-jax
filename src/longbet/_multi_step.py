@@ -30,9 +30,8 @@ from longbet._multi_state import (
     split_multi_chain_fields,
 )
 from longbet._state import LongBetState
-from longbet._step import longbet_single_step, _sample_inv_gamma
+from longbet._step import longbet_single_step, _sample_inv_gamma, _tempered_single_step
 from longbet._sur import conditional_residual, innovation_residual
-from longbet._shared_forest import shared_forest_step, shared_ridge_step
 
 
 def sample_loadings(
@@ -117,34 +116,32 @@ def multi_single_step(
     coupled = multi_state.sur_active and any(multi_state.continuous_mask[1:])
     observed = jnp.stack([st.obs_mask for st in states])
     variances = jnp.stack([st.sigma2 for st in states])
-    shared_forest = multi_state.shared_forest
-    sharing = shared_forest is not None
+    # Parallel tempering: the replica's inverse temperature scales
+    # every likelihood precision; see longbet._tempering.
+    tempered = states[0].is_tempered
+    beta = jnp.asarray(states[0].temperature, dtype=jnp.float32) if tempered else None
 
     for m in range(M):
         st = states[m]
         mask = st.obs_mask
         if not coupled:
             # Preserve the scalar sampler exactly, including its key schedule.
-            states[m] = longbet_single_step(outcome_step_keys[m], st, shared_treatment=sharing)
+            states[m] = (_tempered_single_step(outcome_step_keys[m], st) if tempered
+                         else longbet_single_step(outcome_step_keys[m], st))
             continue
 
         raw = jnp.stack([child.resid for child in states])
         resid, precision = conditional_residual(raw, observed, Gamma, variances, m)
+        if tempered:
+            precision = jnp.where(mask, precision * beta, precision)
         offset = jnp.where(mask, st.resid - resid, 0.0)
         adjusted = eqx.tree_at(
             lambda s: s.resid, st, resid
         )
-        updated = longbet_single_step(outcome_step_keys[m], adjusted, precision, shared_treatment=sharing)
+        updated = longbet_single_step(outcome_step_keys[m], adjusted, precision)
         states[m] = eqx.tree_at(
             lambda s: s.resid, updated, jnp.where(mask, updated.resid + offset, 0.0)
         )
-
-    if sharing:
-        # New independent substreams, without perturbing the legacy/off path.
-        shared_forest, states = shared_forest_step(
-            random.fold_in(outcome_step_keys[0], 721), shared_forest, states, Gamma)
-        shared_forest, states = shared_ridge_step(
-            random.fold_in(outcome_step_keys[0], 722), shared_forest, states)
 
     # Mean/latent blocks are now complete. Gamma and innovation variances each
     # condition on these current raw residuals. In particular, do not estimate
@@ -158,7 +155,8 @@ def multi_single_step(
             if m > 0:
                 row_draw = sample_loadings(
                     loading_keys[m], predecessors=states[:m], response=st,
-                    sigma2=st.sigma2, prior_var=multi_state.sur_prior_var,
+                    sigma2=(st.sigma2 / beta if tempered else st.sigma2),
+                    prior_var=multi_state.sur_prior_var,
                 )
                 # Retain the historical initialization convention only on the
                 # first burn-in sweep; all subsequent sweeps update loadings.
@@ -166,10 +164,11 @@ def multi_single_step(
                     jnp.where(sweep_index > 0, row_draw, Gamma[m, :m])
                 )
             innovation = jnp.where(st.obs_mask, innovation_residual(raw, Gamma, m), 0.0)
+            scale = beta if tempered else 1.0
             sigma2 = _sample_inv_gamma(
                 random.split(outcome_step_keys[m], 10)[9],
-                st.sigma_prior_a + jnp.sum(st.obs_mask) / 2.0,
-                st.sigma_prior_b + 0.5 * jnp.sum(innovation**2),
+                st.sigma_prior_a + scale * jnp.sum(st.obs_mask) / 2.0,
+                st.sigma_prior_b + 0.5 * scale * jnp.sum(innovation**2),
             )
             states[m] = eqx.tree_at(
                 lambda s: (s.sigma2, s.error_cov_inv.value), st,
@@ -177,10 +176,9 @@ def multi_single_step(
             )
 
     return eqx.tree_at(
-        lambda s: (s.states, s.gamma_loadings, s.shared_forest),
+        lambda s: (s.states, s.gamma_loadings),
         multi_state,
-        (tuple(states), Gamma, shared_forest),
-        is_leaf=lambda x: x is None,
+        (tuple(states), Gamma),
     )
 
 

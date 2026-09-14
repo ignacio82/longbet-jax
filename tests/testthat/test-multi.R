@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-test_that("coupled continuous fits require an explicitly proper variance prior", {
+test_that("variance priors must be proper", {
   skip_without_engine()
   d <- make_panel(n = 12)
-  expect_error(longbet_multi(list(a = d$y, b = -d$y), d$x, d$z),
-               "require a proper innovation-variance prior")
+  expect_error(longbet_multi(list(a = d$y, b = -d$y), d$x, d$z, sigma_prior_a = 0),
+               "positive")
 })
 
 test_that("longbet_multi fits multiple continuous and binary outcomes", {

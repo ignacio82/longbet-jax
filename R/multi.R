@@ -21,11 +21,8 @@
 #' preserving their caller order, with zero incoming loadings and unit marginal
 #' latent variance. Discrete outcomes have no free residual correlation parameter.
 #' Note: aligned draws do not establish calibrated
-#' joint inference. By default treatment trees are outcome-specific. Set
-#' `num_shared_trees > 0` to share that many treatment partitions with vector
-#' leaves, retaining private treatment trees (`shared_private_sur_v1`).
-#' Shared leaves may have different signs and magnitudes in each outcome.
-#' `sur = FALSE` turns off residual correlation, not this structural sharing.
+#' joint inference. Treatment trees are outcome-specific; only the residual
+#' likelihood couples the outcomes.
 #' Check convergence of the effects and decision events before interpreting
 #' their probabilities. Both scalar and multi-outcome fits made before the
 #' 2026-09-07 dynamic leaf-precision cache repair must be refitted, not reloaded.
@@ -58,19 +55,16 @@
 #' @param sig_knl Kernel standard deviation for the exposure trajectory.
 #' @param lambda_knl Kernel lengthscale over the exposure index.
 #' @param kernel_type One of `"se"`, `"matern32"`, `"matern52"`, `"ar1"`.
-#' @param gp_jitter Relative diagonal jitter on the kernel.
 #' @param sigma_m Prior standard deviation of the marginalized constant GP mean.
 #' @param gp_constant_mean Whether the projection reverts to an estimated common level.
 #' @param split_time_ps Whether prognostic forest may split on calendar time.
-#' @param split_time_trt Whether treatment forest may split on exposure index.
+#' @param split_calendar_trt Whether treatment forests may split on calendar time
+#'   (see [longbet()]).
 #' @param random_intercept Whether to fit unit random intercepts.
 #' @param gamma_prior_a,gamma_prior_b Inverse-gamma prior on unit-intercept variance.
-#' @param sigma_prior_a,sigma_prior_b Inverse-gamma prior on innovation variance.
-#'   Both must be explicitly positive for coupled continuous outcomes. For
-#'   standardized responses, `2` and `1` specify a proper IG(2,1) prior with
-#'   mean variance one. When `standardize=FALSE`, choose these in outcome units.
-#' @param sigma_b Prior standard deviation of adaptive coding weights.
-#' @param sigma_alpha Prior standard deviation of prognostic scale.
+#' @param sigma_prior_a,sigma_prior_b Inverse-gamma prior on innovation variance,
+#'   proper by construction; the default IG(2, 1) has prior mean variance one on
+#'   the standardized scale. When `standardize=FALSE`, choose these in outcome units.
 #' @param outcome Outcome type(s): `"continuous"`, `"binary"`, `"ordinal"`, or a vector of length `M`.
 #' @param num_categories Integer broadcast to ordinal outcomes, or a list in
 #'   user order (optionally fully named), with `NULL` for nonordinal outcomes.
@@ -79,24 +73,13 @@
 #' @param cutpoint_prior_scale Shared finite positive ordered-normal cutpoint
 #'   prior scale in latent probit units. Inactive for nonordinal outcomes or K=2.
 #' @param outcome_names Optional character vector of length `M` naming the outcomes.
-#' @param a_scaling Whether to sample the prognostic scale `alpha`.
-#' @param b_scaling Whether to sample adaptive coding weights `b0`, `b1`.
-#' @param ridge_move Whether to run Metropolis move along beta-nu ridge.
-#' @param ridge_proposal_sigma Proposal standard deviation for `log c`.
+#' @param tempering_levels,tempering_beta_min Parallel-tempering options, as in
+#'   [longbet()]; every replica carries all outcomes.
 #' @param standardize Whether to centre and scale continuous outcomes internally.
 #' @param random_seed Base PRNG seed.
 #' @param device `"auto"`, `"cpu"`, or `"gpu"`.
 #' @param sur Whether to enable full-precision triangular SUR coupling.
 #' @param sur_prior_var Prior variance for loading regression parameters.
-#' @param num_shared_trees Number of shared treatment trees, replacing this many
-#'   of `num_trees_trt`. Default 0 disables sharing. Must leave at least one
-#'   private treatment tree per outcome. Shared trees use common predictors,
-#'   split settings and a fixed minimum leaf size counting cells observed for
-#'   any outcome; impossible split rules are rejected.
-#' @param shared_variance_fraction Fixed fraction of the unit treatment-forest
-#'   prior variance assigned to shared trees, strictly between 0 and 1.
-#'   The remainder regularizes private trees. This is an explicit prior setting,
-#'   not a learned correlation or mixing weight; inert when sharing is disabled.
 #' @param verbose Whether to print progress messages.
 #' @param ... Reserved; unsupported arguments raise an error.
 #' @return An object of class `longbet_multi`.
@@ -120,7 +103,7 @@
 #' @export
 longbet_multi <- function(y, x, z, t = NULL,
                           x_trt = NULL, x_tv = NULL, x_trt_tv = NULL, ps = NULL,
-                          num_sweeps = 250, num_burnin = 2000, n_skip = 2,
+                          num_sweeps = 1000, num_burnin = 2000, n_skip = 1,
                           num_chains = 4, inner_loop_length = NULL,
                           num_trees_pr = 20, num_trees_trt = 20,
                           min_points_per_leaf_pr = 10, min_points_per_leaf_trt = 10,
@@ -129,24 +112,20 @@ longbet_multi <- function(y, x, z, t = NULL,
                           alpha_split_trt = 0.25, beta_split_trt = 3.0,
                           num_cutpoints = 100,
                           sig_knl = 1.0, lambda_knl = 1.0, kernel_type = "se",
-                          gp_jitter = 1e-6, sigma_m = 1.0, gp_constant_mean = TRUE,
-                          split_time_ps = TRUE, split_time_trt = TRUE,
+                          sigma_m = 1.0, gp_constant_mean = TRUE,
+                          split_time_ps = TRUE, split_calendar_trt = TRUE,
                           random_intercept = TRUE,
                           gamma_prior_a = 1.0, gamma_prior_b = 0.1,
-                          sigma_prior_a = 0.0, sigma_prior_b = 0.0,
-                          sigma_b = 0.7071067811865476, sigma_alpha = 1.0,
+                          sigma_prior_a = 2.0, sigma_prior_b = 1.0,
                           outcome = "continuous", outcome_names = NULL,
-                          a_scaling = FALSE, b_scaling = TRUE,
-                          ridge_move = TRUE, ridge_proposal_sigma = 0.2,
+                          tempering_levels = 1, tempering_beta_min = 0.05,
                           standardize = TRUE, random_seed = 0,
                           device = c("auto", "cpu", "gpu"),
                           sur = TRUE, sur_prior_var = 1.0,
-                          num_shared_trees = 0, shared_variance_fraction = 0.5,
                           verbose = FALSE, num_categories = NULL,
                           cutpoint_prior_scale = 5.0, ...) {
 
   .reject_unsupported(...)
-  .check_shared_treatment_options(num_shared_trees, shared_variance_fraction)
   device <- match.arg(device)
   .check_cutpoint_prior(cutpoint_prior_scale)
 
@@ -318,32 +297,25 @@ longbet_multi <- function(y, x, z, t = NULL,
     sig_knl = as.numeric(sig_knl),
     lambda_knl = as.numeric(lambda_knl),
     kernel_type = kernel_type,
-    gp_jitter = as.numeric(gp_jitter),
     sigma_m = as.numeric(sigma_m),
     gp_constant_mean = as.logical(gp_constant_mean),
     split_time_ps = as.logical(split_time_ps),
-    split_time_trt = as.logical(split_time_trt),
+    split_calendar_trt = as.logical(split_calendar_trt),
     random_intercept = as.logical(random_intercept),
     gamma_prior_a = as.numeric(gamma_prior_a),
     gamma_prior_b = as.numeric(gamma_prior_b),
     sigma_prior_a = as.numeric(sigma_prior_a),
     sigma_prior_b = as.numeric(sigma_prior_b),
-    sigma_b = as.numeric(sigma_b),
-    sigma_alpha = as.numeric(sigma_alpha),
     outcome = resolved_outcomes[1],
     num_categories = category_counts[[1]],
     cutpoint_prior_scale = as.numeric(cutpoint_prior_scale),
-    sample_alpha = as.logical(a_scaling),
-    adaptive_coding = as.logical(b_scaling),
-    ridge_move = as.logical(ridge_move),
-    ridge_proposal_sigma = as.numeric(ridge_proposal_sigma),
+    tempering_levels = as.integer(tempering_levels),
+    tempering_beta_min = as.numeric(tempering_beta_min),
     standardize = as.logical(standardize),
     random_seed = as.integer(random_seed),
     device = device,
     sur = as.logical(sur),
-    sur_prior_var = as.numeric(sur_prior_var),
-    num_shared_trees = as.integer(num_shared_trees),
-    shared_variance_fraction = as.numeric(shared_variance_fraction)
+    sur_prior_var = as.numeric(sur_prior_var)
   )
 
   if (isTRUE(verbose)) {
@@ -467,8 +439,6 @@ longbet_multi <- function(y, x, z, t = NULL,
     sur = as.logical(sur),
     sur_prior_var = as.numeric(sur_prior_var),
     sur_active = as.logical(py_model$sur_active),
-    num_shared_trees = as.integer(num_shared_trees),
-    shared_variance_fraction = as.numeric(shared_variance_fraction),
     sampler_semantics = as.character(py_model$sampler_semantics),
     rng_scheme_version = as.integer(py_model$rng_scheme_version),
     provenance = as.character(py_model$provenance),
@@ -507,11 +477,6 @@ print.longbet_multi <- function(x, ...) {
               if (isTRUE(x$sur_active)) "yes" else "no",
               x$sur_prior_var))
   cat(sprintf("  Semantics: %s\n", x$sampler_semantics))
-  if (!is.null(x$num_shared_trees) && x$num_shared_trees > 0) {
-    cat(sprintf("  Treatment trees: %d shared + %d private per outcome (shared prior variance fraction %.3f)\n",
-                x$num_shared_trees, p$num_trees_trt - x$num_shared_trees,
-                x$shared_variance_fraction))
-  }
   invisible(x)
 }
 

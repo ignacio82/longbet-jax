@@ -123,3 +123,28 @@ test_that("unbalanced panels are accepted", {
   pred <- predict(fit, x = d$x, z = d$z, t = d$t)
   expect_true(all(is.finite(pred$tauhats.mean)))
 })
+
+
+test_that("split_calendar_trt reaches the engine and keeps predictions finite", {
+  skip_without_engine()
+  d <- make_panel(n = 20, Tn = 5)
+  fit <- longbet(y = d$y, x = d$x, z = d$z, t = d$t,
+                 split_calendar_trt = FALSE, num_chains = 1, num_burnin = 2,
+                 num_sweeps = 3, num_trees_pr = 2, num_trees_trt = 2)
+  expect_s3_class(fit, "longbet")
+  pred <- predict(fit, x = d$x, z = d$z, t = d$t, summary_only = TRUE)
+  expect_true(all(is.finite(pred$tauhats.mean)))
+})
+
+test_that("tempering options reach the engine and keep only posterior replicas", {
+  skip_without_engine()
+  d <- make_panel(n = 20, Tn = 5)
+  fit <- longbet(y = d$y, x = d$x, z = d$z, t = d$t, num_chains = 2, tempering_levels = 3,
+                 tempering_beta_min = 0.4, num_burnin = 6, num_sweeps = 4,
+                 num_trees_pr = 2, num_trees_trt = 2)
+  expect_s3_class(fit, "longbet")
+  pred <- predict(fit, x = d$x, z = d$z, t = d$t, summary_only = TRUE)
+  expect_true(all(is.finite(pred$tauhats.mean)))
+  expect_error(longbet(y = d$y, x = d$x, z = d$z, t = d$t, tempering_levels = 0,
+                       num_chains = 1, num_burnin = 2, num_sweeps = 2), "tempering_levels")
+})

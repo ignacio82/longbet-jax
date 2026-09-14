@@ -78,9 +78,6 @@ def _build_state():
         num_trees_pr=2,
         num_trees_trt=2,
         random_intercept=True,
-        adaptive_coding=True,
-        sample_alpha=False,
-        ridge_move=True,
         gamma_prior_a=GAMMA_A,
         gamma_prior_b=GAMMA_B,
         sigma_prior_a=SIGMA_A,
@@ -109,7 +106,7 @@ def _whitener(state, config):
     """``L^-1`` for ``beta``'s prior, so the target becomes exactly ``N(0, I)``."""
     K = build_kernel_matrix(
         np.arange(state.S_max + 1), SIG_KNL, LAMBDA_KNL, config.kernel_type,
-        SIGMA_M, config.gp_constant_mean, config.gp_jitter,
+        SIGMA_M, config.gp_constant_mean,
     )
     return np.linalg.inv(np.linalg.cholesky(K))
 

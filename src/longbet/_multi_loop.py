@@ -36,7 +36,7 @@ from longbet._loop import (
 )
 from longbet._multi_state import MultiLongBetState
 from longbet._multi_step import multi_step
-from longbet._shared_forest import enable_x64
+from longbet._tempering import multi_select_replicas, multi_swap_step
 
 
 class MultiLongBetTrace(eqx.Module):
@@ -53,35 +53,11 @@ class MultiLongBetTrace(eqx.Module):
 
     traces: tuple[LongBetTrace, ...]
     gamma_loadings: Float32[Array, '...']
-    # Each child's nu trace stores private trees first, shared trees last.
-    # Shared topology is repeated for scalar prediction/export, not independent.
-    num_shared_trees: int = eqx.field(static=True, default=0)
 
 
 def _multi_views(state: MultiLongBetState, m: int):
-    """Prediction-ready views: concatenate private and shared trees per outcome.
-
-    Store both components in physical internal-response units, preserving one
-    common topology in every outcome's shared suffix. The sampler state itself
-    is not altered. Combined traces remain usable by scalar prediction code.
-    """
-    v_mu, v_nu = _make_views(state.states[m])
-    shared = state.shared_forest
-    if shared is not None:
-        private = v_nu.forest
-        v_nu = eqx.tree_at(lambda v: (v.forest.leaf_tree, v.forest.leaf_unit,
-            v.forest.var_tree, v.forest.split_tree, v.forest.grow_prop_count,
-            v.forest.grow_acc_count, v.forest.prune_prop_count, v.forest.prune_acc_count), v_nu,
-            (jnp.concatenate((private.leaf_tree.astype(jnp.float32)*private.leaf_unit,
-                              shared.leaf_tree[..., :, m, :]), axis=-2),
-             jnp.float32(1),
-             jnp.concatenate((private.var_tree, shared.var_tree), axis=-2),
-             jnp.concatenate((private.split_tree, shared.split_tree), axis=-2),
-             private.grow_prop_count + shared.grow_prop_count,
-             private.grow_acc_count + shared.grow_acc_count,
-             private.prune_prop_count + shared.prune_prop_count,
-             private.prune_acc_count + shared.prune_acc_count))
-    return v_mu, v_nu
+    """Prediction-ready views of outcome ``m``'s two forests."""
+    return _make_views(state.states[m])
 
 
 class MultiLongBetBurninTrace(eqx.Module):
@@ -96,6 +72,8 @@ class RunMultiLongBetResult(NamedTuple):
     final_state: MultiLongBetState
     main_trace: MultiLongBetTrace
     burnin_trace: MultiLongBetBurninTrace | None
+    #: Per replica, accepted exchanges with the next level (tempered runs only).
+    swap_accepts: Any = None
 
 
 class _MultiMCMCCarry(eqx.Module):
@@ -117,6 +95,7 @@ class _MultiMCMCCarry(eqx.Module):
     sigma_gamma2_traces: tuple[Float32[Array, '...'], ...]
     cutpoint_traces: tuple[Float32[Array, '...'] | None, ...]
     gamma_loadings_trace: Float32[Array, '...']
+    swap_accepts: Float32[Array, '...'] | None
 
 
 def run_multi_longbet_mcmc(
@@ -128,12 +107,8 @@ def run_multi_longbet_mcmc(
     inner_loop_length: int | None = None,
     callback: Callable[[int, int, MultiLongBetState], None] | None = None,
 ) -> RunMultiLongBetResult:
-    # Local float64 leaf matrices require the same dtype context during the
-    # outer JIT's tracing, batching and lowering. All stored state stays f32.
-    # Do not globally mutate the user's JAX settings or the sharing-off path.
-    with enable_x64(True if state.shared_forest is not None else jax.config.x64_enabled):
-        return _run_multi_longbet_mcmc(key, state, n_burn, n_save, n_skip,
-                                      inner_loop_length, callback)
+    return _run_multi_longbet_mcmc(key, state, n_burn, n_save, n_skip,
+                                  inner_loop_length, callback)
 
 
 def _run_multi_longbet_mcmc(
@@ -168,7 +143,12 @@ def _run_multi_longbet_mcmc(
     n_iters = n_burn_i + n_skip_i * n_save_i
 
     M = state.M
-    chains = state.gamma_loadings.shape[:-2]
+    levels = int(state.states[0].tempering_levels)
+    tempered = state.has_chain_axis and levels > 1
+    cold_idx = jnp.arange(0, state.num_chains, levels) if tempered else None
+    cold = (lambda st: multi_select_replicas(st, cold_idx)) if tempered else (lambda st: st)
+    cold_init = cold(state)
+    chains = cold_init.gamma_loadings.shape[:-2]
     sample_axis = 1 if chains else 0
 
     # Preallocate traces for each equation
@@ -186,8 +166,8 @@ def _run_multi_longbet_mcmc(
     cutpoint_traces = []
 
     for m in range(M):
-        child = state.states[m]
-        v_mu, v_nu = _multi_views(state, m)
+        child = cold_init.states[m]
+        v_mu, v_nu = _multi_views(cold_init, m)
         mu_burnins.append(_empty_trace(n_burn_i, v_mu, BurninTrace))
         nu_burnins.append(_empty_trace(n_burn_i, v_nu, BurninTrace))
         mu_mains.append(_empty_trace(n_save_i, v_mu, MainTrace))
@@ -225,6 +205,7 @@ def _run_multi_longbet_mcmc(
         sigma_gamma2_traces=tuple(sigma_gamma2_traces),
         cutpoint_traces=tuple(cutpoint_traces),
         gamma_loadings_trace=gamma_loadings_trace,
+        swap_accepts=jnp.zeros((state.num_chains,), jnp.float32) if tempered else None,
     )
 
     inner_length = (
@@ -239,8 +220,14 @@ def _run_multi_longbet_mcmc(
 
         def body_fn(carry_in: _MultiMCMCCarry) -> _MultiMCMCCarry:
             key_step, key_next = random.split(carry_in.key)
-            new_state = multi_step(key_step, carry_in.state, sweep_index=carry_in.i_total)
+            key_swap = random.fold_in(key_step, 4242)  # keeps the untempered stream unchanged
             i = carry_in.i_total
+            new_state = multi_step(key_step, carry_in.state, sweep_index=i)
+            swap_accepts = carry_in.swap_accepts
+            if tempered:
+                new_state, accepted = multi_swap_step(key_swap, new_state, i)
+                swap_accepts = swap_accepts + accepted.astype(jnp.float32)
+            cold_state = cold(new_state)
 
             is_burn = i < n_burn_i
             burnin_idx = jnp.where(is_burn, i, noop_idx)
@@ -263,11 +250,11 @@ def _run_multi_longbet_mcmc(
             new_cutpoint_traces = []
 
             for m_idx in range(M):
-                child_st = new_state.states[m_idx]
+                child_st = cold_state.states[m_idx]
                 cp_trace = carry_in.cutpoint_traces[m_idx]
                 new_cutpoint_traces.append(_set_param(cp_trace, main_idx, child_st.cutpoints, sample_axis)
                                            if cp_trace is not None else None)
-                v_mu, v_nu = _multi_views(new_state, m_idx)
+                v_mu, v_nu = _multi_views(cold_state, m_idx)
                 new_mu_burnins.append(
                     _set(carry_in.mu_burnins[m_idx], burnin_idx, BurninTrace.from_state(v_mu))
                 )
@@ -310,7 +297,7 @@ def _run_multi_longbet_mcmc(
             new_gamma_loadings_trace = _set_param(
                 carry_in.gamma_loadings_trace,
                 main_idx,
-                new_state.gamma_loadings,
+                cold_state.gamma_loadings,
                 sample_axis,
             )
 
@@ -331,6 +318,7 @@ def _run_multi_longbet_mcmc(
                 sigma_gamma2_traces=tuple(new_sigma_gamma2_traces),
                 cutpoint_traces=tuple(new_cutpoint_traces),
                 gamma_loadings_trace=new_gamma_loadings_trace,
+                swap_accepts=swap_accepts,
             )
 
         return lax.while_loop(cond_fn, body_fn, c)
@@ -368,8 +356,6 @@ def _run_multi_longbet_mcmc(
     main_trace = MultiLongBetTrace(
         traces=tuple(child_traces),
         gamma_loadings=carry.gamma_loadings_trace,
-        num_shared_trees=(state.shared_forest.leaf_tree.shape[-3]
-                          if state.shared_forest is not None else 0),
     )
     burnin_trace = (
         MultiLongBetBurninTrace(traces=tuple(child_burnin_traces))
@@ -381,4 +367,4 @@ def _run_multi_longbet_mcmc(
         final_state=carry.state,
         main_trace=main_trace,
         burnin_trace=burnin_trace,
-    )
+        swap_accepts=carry.swap_accepts)

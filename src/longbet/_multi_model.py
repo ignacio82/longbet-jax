@@ -44,7 +44,6 @@ from longbet._multi_io import load_multi_npz, save_multi_npz
 from longbet._multi_loop import MultiLongBetTrace, run_multi_longbet_mcmc
 from longbet._multi_state import MultiLongBetState, init_multi_longbet
 from longbet._sur import SAMPLER_SEMANTICS
-from longbet._shared_forest import SHARED_SAMPLER_SEMANTICS
 
 
 class OutcomeList(list):
@@ -148,13 +147,9 @@ class LongBetMulti:
     Fits separate prognostic and treatment forests per outcome on a shared
     panel, using the full precision of an identified triangular SUR likelihood.
     Downstream observations inform earlier means and binary latent responses.
-    By default only the residual likelihood couples outcome-specific forests.
-    With ``num_shared_trees > 0``, that many treatment trees share partitions
-    and have vector leaves; remaining treatment trees and all prognostic trees
-    are private. ``shared_variance_fraction`` specifies their prior allocation
-    without increasing total treatment-forest variance. Disabling SUR does not
-    disable shared partitions. Convergence and calibration must not be
-    inferred from aligned draws or a joint-event counting utility.
+    Only the residual likelihood couples the outcome-specific forests.
+    Convergence and calibration must not be inferred from aligned draws or a
+    joint-event counting utility.
 
     Coupled fits containing continuous outcomes require explicitly positive
     ``sigma_prior_a`` and ``sigma_prior_b``. For standardized responses,
@@ -192,8 +187,7 @@ class LongBetMulti:
         self.meany: tuple[float, ...] | None = None
         self.sdy: tuple[float, ...] | None = None
         self.offset_: tuple[float, ...] | None = None
-        self.sampler_semantics: str = (SHARED_SAMPLER_SEMANTICS
-            if self.config.num_shared_trees else SAMPLER_SEMANTICS)
+        self.sampler_semantics: str = SAMPLER_SEMANTICS
         self.rng_scheme_version: int = 1
         self.provenance: str = ""
 
@@ -293,8 +287,7 @@ class LongBetMulti:
         self.provenance = str(uuid.uuid4())
         # A fresh fit uses the current sampler, regardless of metadata left by
         # an earlier fit on this object.
-        self.sampler_semantics = (SHARED_SAMPLER_SEMANTICS
-            if cfg.num_shared_trees else SAMPLER_SEMANTICS)
+        self.sampler_semantics = SAMPLER_SEMANTICS
 
         # 2. Key schedule (Section 6.1, rng_scheme_version=1)
         if key is None:
@@ -385,7 +378,6 @@ class LongBetMulti:
         max_split_nu = jnp.asarray(shared_design.max_split_nu, dtype=jnp.uint8)
 
         # 4. Device placement and MCMC execution
-        cfg.validate_multi_variance_prior(norm_in.user_outcomes)
         device = resolve_device(cfg.device)
         with jax.default_device(device):
             multi_state = init_multi_longbet(
@@ -398,7 +390,7 @@ class LongBetMulti:
                 max_split_nu=max_split_nu,
                 norm_input=norm_in,
                 config=cfg,
-                num_chains=cfg.num_chains,
+                num_chains=cfg.num_chains * cfg.tempering_levels,
                 init_key=k_init,
             )
 
@@ -411,20 +403,10 @@ class LongBetMulti:
                 inner_loop_length=cfg.inner_loop_length,
             )
 
-        if cfg.num_shared_trees:
-            # Do not hand out a fitted object whose retained posterior contains
-            # failed matrix factorizations. Exact linear relationships plus an
-            # improper innovation-variance prior can be degenerate even in f64.
-            finite = [jax.numpy.all(jax.numpy.isfinite(a))
-                      for a in jax.tree.leaves(result.main_trace)]
-            if not all(bool(a) for a in finite):
-                raise FloatingPointError(
-                    "Shared treatment sampling produced non-finite posterior draws. "
-                    "Check for nearly deterministic/redundant outcomes and use justified "
-                    "proper innovation-variance priors (sigma_prior_a, sigma_prior_b). "
-                    "No predictions or joint probabilities from this fit are valid.")
         self.state = result.final_state
         self.trace = result.main_trace
+        self.swap_accepts_ = (None if result.swap_accepts is None
+                              else np.asarray(result.swap_accepts))
         if "ordinal" in self.outcome:
             jax.block_until_ready(self.trace)
 
@@ -433,15 +415,13 @@ class LongBetMulti:
         for u in range(M):
             internal_idx = self.inverse_order[u]
             child_otype = self.outcome[u]
-            child_cfg = dataclasses.replace(cfg, outcome=child_otype, num_shared_trees=0,
+            child_cfg = dataclasses.replace(cfg, outcome=child_otype,
                                              num_categories=self.num_categories[u])
 
             child_model = LongBet(child_cfg)
             child_model.design_ = shared_design
             child_model.trace = self.trace.traces[internal_idx]
-            # The shared/private sampler's local state is not a scalar state:
-            # its forest is private while nu_fit includes the shared component.
-            child_model.state = (None if cfg.num_shared_trees else self.state.states[internal_idx])
+            child_model.state = self.state.states[internal_idx]
             child_model.multi_origin = self._child_origin(u)
             child_model.meany = self.meany[internal_idx]
             child_model.sdy = self.sdy[internal_idx]
@@ -462,9 +442,7 @@ class LongBetMulti:
         """Joint provenance survives extracting/saving an outcome's marginal fit."""
         return {"provenance": self.provenance, "sampler_semantics": self.sampler_semantics,
                 "outcome_name": self.outcome_names[u],
-                "outcomes": list(self.outcome),
-                "num_shared_trees": self.config.num_shared_trees,
-                "shared_variance_fraction": self.config.shared_variance_fraction}
+                "outcomes": list(self.outcome)}
 
     def predict(
         self,
@@ -660,7 +638,7 @@ def joint_prob(
     if not isinstance(pred, LongBetMultiPrediction):
         raise TypeError(f"pred must be a LongBetMultiPrediction, got {type(pred)}")
 
-    if getattr(pred, "sampler_semantics", None) not in (SAMPLER_SEMANTICS, SHARED_SAMPLER_SEMANTICS):
+    if getattr(pred, "sampler_semantics", None) != SAMPLER_SEMANTICS:
         raise ValueError(
             "Joint prediction uses legacy or unsupported sampler semantics. "
             "Refit from the original data and regenerate predictions."

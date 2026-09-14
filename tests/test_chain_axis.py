@@ -116,7 +116,7 @@ def test_shared_data_is_not_replicated_per_chain():
 def test_multichain_sweep_equals_independent_single_chain_sweeps():
     """A k-chain sweep must equal k single-chain sweeps, value for value."""
     num_chains = 3
-    base = _state(sample_alpha=True)
+    base = _state()
     spec = chain_filter_spec(base)
 
     # Give each chain a genuinely different starting point, so an axis mistake
@@ -204,7 +204,7 @@ def test_chains_start_overdispersed():
         chain_key=random.key(0),
     )
 
-    for name in ("beta", "gamma", "sigma2", "sigma_gamma2", "b0", "b1"):
+    for name in ("beta", "gamma", "sigma2", "sigma_gamma2"):
         same = np.asarray(getattr(identical, name))
         apart = np.asarray(getattr(dispersed, name))
         assert np.allclose(same[0], same[1]), f"{name} should be replicated without a key"
@@ -257,11 +257,10 @@ def test_gp_starts_cover_the_declared_prior():
 
 @pytest.mark.parametrize("outcome", ["continuous", "binary"])
 def test_fixed_coding_preserves_both_arms(outcome):
-    """Disabling coding updates must keep the documented b0=b1=1 model."""
-    state = _state(adaptive_coding=False, max_depth_pr=2, max_depth_trt=2,
-                   outcome=outcome)
+    """The coding scales are fixed at b0 = 0, b1 = 1 and never move."""
+    state = _state(max_depth_pr=2, max_depth_trt=2, outcome=outcome)
     for key in random.split(random.key(691), 3):
-        assert float(state.b0) == 1
+        assert float(state.b0) == 0
         assert float(state.b1) == 1
         state = longbet_single_step(key, state)
-    assert float(state.b0) == float(state.b1) == 1
+    assert float(state.b0) == 0 and float(state.b1) == 1

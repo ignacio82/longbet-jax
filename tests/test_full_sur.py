@@ -60,20 +60,20 @@ def test_conditional_precision_matches_marginal_gaussian(binary_rows):
             np.testing.assert_allclose(resid[cell], (P@raw[idx, cell])[pos]/P[pos,pos], rtol=3e-6, atol=2e-6)
 
 
-def _constant_state(y, observed, variance=1., binary=False, ridge_move=False, **overrides):
+def _constant_state(y, observed, variance=1., binary=False, **overrides):
     """One constant mu leaf, with nu switched off via a fixed zero trajectory."""
     n = len(y)
     cfg = LongBetConfig(num_trees_pr=1, num_trees_trt=1,
         max_depth_pr=1, max_depth_trt=1,
         min_points_per_leaf_pr=1, min_points_per_leaf_trt=1,
-        sample_beta=False, adaptive_coding=False, random_intercept=False,
-        ridge_move=ridge_move, standardize=False, num_chains=1,
+        sample_beta=False, random_intercept=False,
+        standardize=False, num_chains=1,
         outcome="binary" if binary else "continuous")
     cfg = dataclasses.replace(cfg, **overrides)
     st = init_longbet(X_unified=jnp.zeros((1,n),jnp.uint8),
         y=jnp.array(y,jnp.float32), unit_idx=jnp.zeros(n,jnp.int32),
         time_idx=jnp.arange(n), exposure_idx=jnp.zeros(n,jnp.int32),
-        z_vec=jnp.zeros(n), obs_mask=jnp.array(observed),
+        z_vec=jnp.ones(n), obs_mask=jnp.array(observed),
         max_split_mu=jnp.zeros(1,jnp.uint8), max_split_nu=jnp.zeros(1,jnp.uint8),
         config=cfg)
     return eqx.tree_at(lambda s:(s.beta,s.sigma2),st,
@@ -230,7 +230,8 @@ def test_tiny_weights_preserve_the_actual_treatment_fit(weight):
         st = longbet_single_step(jax.random.key(seed), st)
         actual = evaluate_forest(st.X, st.forest_nu, sum_batch_axis=-1)
         np.testing.assert_allclose(st.nu_fit, actual, atol=2e-6, rtol=2e-6)
-        np.testing.assert_allclose(st.resid, y-st.mu_fit-weight*actual, atol=2e-6)
+        # The ridge move may rescale beta and the leaves together; the product is invariant.
+        np.testing.assert_allclose(st.resid, y-st.mu_fit-st.beta[0]*actual, atol=2e-6)
 
 
 def test_precision_cache_respects_pending_prunes_and_untouched_leaves():
@@ -296,7 +297,7 @@ def test_full_precision_refresh_never_builds_dense_membership_arrays():
 
 @pytest.mark.parametrize("coupled", [False, True])
 def test_fixed_beta_is_not_rescaled_by_ridge_move(coupled):
-    st = _constant_state(np.zeros(4), np.ones(4, bool), ridge_move=True)
+    st = _constant_state(np.zeros(4), np.ones(4, bool))
     st = eqx.tree_at(lambda s: s.beta, st, jnp.ones_like(st.beta))
     precision = jnp.full(4, 1.3) if coupled else None
     for i in range(20):
@@ -363,48 +364,44 @@ def test_mixed_tree_posterior_matches_observed_likelihood_quadrature():
                                expected_event, atol=.025)
 
 
-def test_weighted_scale_gp_coding_and_intercept_conditionals():
+def test_weighted_scale_gp_and_intercept_conditionals():
     """Check each parameter block's sufficient statistics at its scheduled key."""
     from longbet._gp import sample_beta_gp
 
     y = jnp.array([-1., .2, 1.4, 2., .4, -.3])
     p = jnp.array([.2, 3., 1., .6, 4., 2.])
-    st = _constant_state(y, np.ones(len(y), bool), variance=1.7,
-                         sample_alpha=True, sample_beta=True,
-                         adaptive_coding=True, random_intercept=True)
     z = jnp.array([0., 0., 0., 1., 1., 1.])
-    b_old = jnp.where(z == 1, st.b1, st.b0)
     nu_old = jnp.full(len(y), 1.3)
-    st = eqx.tree_at(lambda s: (s.beta, s.nu_fit, s.forest_nu.leaf_tree,
-                                s.z_vec, s.resid), st,
-                    (jnp.ones_like(st.beta), nu_old,
-                     st.forest_nu.leaf_tree.at[:, 1].set(1.3/st.forest_nu.leaf_unit),
-                     z, y-b_old*nu_old))
+
+    def prepared(sample_beta):
+        st = _constant_state(y, np.ones(len(y), bool), variance=1.7,
+                             sample_beta=sample_beta, random_intercept=True)
+        b_old = jnp.where(z == 1, st.b1, st.b0)
+        return eqx.tree_at(lambda s: (s.beta, s.nu_fit, s.forest_nu.leaf_tree, s.z_vec, s.resid), st,
+                           (jnp.ones_like(st.beta), nu_old,
+                            st.forest_nu.leaf_tree.at[:, 1].set(1.3/st.forest_nu.leaf_unit),
+                            z, y-b_old*nu_old))
+
+    st = prepared(True)
+    b_old = jnp.where(z == 1, st.b1, st.b0)
     key = jax.random.key(722)
     keys = jax.random.split(key, 10)
     out = longbet_single_step(key, st, p)
+    # The same key with beta held fixed gives the treatment fit right after its
+    # Gibbs draw (nu precedes beta in the sweep), before the ridge move rescales
+    # beta and the leaves together. Only the product is identified.
+    frozen = longbet_single_step(key, prepared(False), p)
 
-    P_alpha = jnp.sum(p*out.mu_fit**2)+1/st.sigma_alpha**2
-    h_alpha = jnp.sum(p*out.mu_fit*(y-b_old*nu_old))
-    expected_alpha = h_alpha/P_alpha+jax.random.normal(keys[2], ())/jnp.sqrt(P_alpha)
-    np.testing.assert_allclose(out.alpha, expected_alpha, rtol=2e-5)
-
-    partial = y-out.alpha*out.mu_fit
-    # nu is updated before beta; alpha still conditions on the previous nu.
+    assert float(out.alpha) == 1
+    partial = y-out.mu_fit
     # There is one exposure bin in this conditional-update fixture.
-    d = b_old*out.nu_fit
+    d = b_old*frozen.nu_fit
     expected_beta = sample_beta_gp(keys[3], jnp.array([jnp.sum(p*d*d)]),
                                    jnp.array([jnp.sum(p*d*partial)]), st.K_chol)
-    np.testing.assert_allclose(out.beta, expected_beta, rtol=2e-5)
+    np.testing.assert_allclose(out.beta[0]*out.nu_fit, expected_beta[0]*frozen.nu_fit, rtol=2e-5)
 
     g = out.beta[0]*out.nu_fit
-    for label, k in ((0, 5), (1, 6)):
-        mask = z == label
-        precision = jnp.sum(jnp.where(mask, p*g*g, 0))+1/st.sigma_b**2
-        h = jnp.sum(jnp.where(mask, p*g*partial, 0))
-        expected = h/precision+jax.random.normal(keys[k], ())/jnp.sqrt(precision)
-        np.testing.assert_allclose(out.b0 if label == 0 else out.b1, expected, rtol=2e-5)
-
+    assert float(out.b0) == 0 and float(out.b1) == 1
     e = partial-jnp.where(z == 1, out.b1, out.b0)*g
     V = 1/(jnp.sum(p)+1/st.sigma_gamma2)
     expected_gamma = V*jnp.sum(p*e)+jax.random.normal(keys[7], (1,))*jnp.sqrt(V)

@@ -30,30 +30,17 @@ from longbet._encourage_model import (
     ConditionalEffect,
     ConditionalEncouragementPrediction,
     EncouragementComparison,
+    EncouragementDraws,
     EncouragementPrediction,
     LongBetEncourage,
+    adoption_distribution,
+    offer_effect_on_outcome,
 )
 from longbet._encourage_design import (
     EncouragementDesign,
     EncouragementDesignResult,
     design_encouragement_effects,
 )
-from longbet._direct_smooth import (
-    DirectSmoothConfig,
-    LongBetDirectSmooth,
-)
-from longbet._hazard_adoption import (
-    HazardAdoptionForest,
-    HazardAdoptionResult,
-    HazardConfig,
-    hazard_adoption_effects,
-)
-from longbet._coupled_hazard_iv import (
-    CoupledHazardConfig,
-    CoupledHazardIV,
-    CoupledHazardResult,
-)
-from longbet._orthogonal_iv import LongBetOrthogonalIV
 from longbet._io import load_npz, save_npz
 from longbet._multi_io import load_multi_npz, save_multi_npz
 from longbet._multi_model import (
@@ -94,29 +81,22 @@ __all__ = [
     "BlockAccumulator",
     "ConditionalEffect",
     "ConditionalEncouragementPrediction",
-    "CoupledHazardConfig",
-    "CoupledHazardIV",
-    "CoupledHazardResult",
     "Design",
-    "DirectSmoothConfig",
     "EncouragementComparison",
+    "EncouragementDraws",
     "EncouragementDesign",
     "EncouragementDesignResult",
     "EncouragementPrediction",
-    "HazardAdoptionForest",
-    "HazardAdoptionResult",
-    "HazardConfig",
     "LongBet",
     "LongBetConfig",
-    "LongBetDirectSmooth",
     "LongBetEncourage",
     "LongBetMulti",
     "LongBetMultiPrediction",
-    "LongBetOrthogonalIV",
     "LongBetPrediction",
     "PosteriorSummary",
     "StabilityResult",
     "adoption_cohorts",
+    "adoption_distribution",
     "att_stability",
     "available_devices",
     "compute_ess",
@@ -129,10 +109,10 @@ __all__ = [
     "encouragement_summary",
     "get_att",
     "get_catt",
-    "hazard_adoption_effects",
     "joint_prob",
     "load_multi_npz",
     "load_npz",
+    "offer_effect_on_outcome",
     "outcome_correlation",
     "plot_rollout",
     "plot_encouragement",

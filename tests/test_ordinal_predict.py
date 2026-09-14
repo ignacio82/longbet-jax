@@ -200,11 +200,9 @@ def test_prediction_pairs_both_forest_inputs_and_scales_the_offset_once(fitted, 
         return (.4 + np.arange(D,dtype=np.float32)[:,None]*.02 + .3*X[None,row,lo:hi]).astype(np.float32)
     monkeypatch.setattr(module, "_eval_block", forest_values)
     pred = model.predict(**data, block_size=M)
-    assert len(calls) == 2
-    factual, control = calls
-    assert np.any(factual[row] != control[row])
-    assert np.all(control[row] == control[row,0])
-    np.testing.assert_array_equal(np.delete(factual,row,axis=0), np.delete(control,row,axis=0))
+    # The treatment forest never sees the exposure index, so one evaluation serves both arms.
+    assert len(calls) == 1
+    factual = control = calls[0]
     tr = model.trace
     alpha = np.asarray(tr.alpha).reshape(D,1)
     beta = np.asarray(tr.beta).reshape(D,-1)
@@ -212,8 +210,8 @@ def test_prediction_pairs_both_forest_inputs_and_scales_the_offset_once(fitted, 
     gamma = np.asarray(tr.gamma).reshape(D,12)[:,np.repeat(np.arange(12),4)]
     f0 = (.4 + np.arange(D,dtype=np.float32)[:,None]*.02 + .3*control[None,row]).astype(np.float32)
     f1 = (.4 + np.arange(D,dtype=np.float32)[:,None]*.02 + .3*factual[None,row]).astype(np.float32)
-    eta0 = alpha*mu + b0*beta[:,:1]*f0 + gamma
-    eta1 = alpha*mu + b1*beta[:,pred.s.ravel()]*f1 + gamma
+    eta0 = alpha*mu + b0*beta[:,:1]*f0 + gamma          # b0 = 0: the untreated surface is mu + gamma
+    eta1 = alpha*mu + b1*beta[:,pred.s.ravel()]*f1*(pred.s.ravel() > 0) + gamma
     np.testing.assert_allclose(pred.muhats0.reshape(M,D).T, eta0, atol=2e-7)
     # Summing mu0+tau may differ by float32 rounding from computing eta1 directly.
     actual1 = pred.muhats0 + pred.tauhats

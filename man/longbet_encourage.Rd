@@ -1,10 +1,9 @@
 \name{longbet_encourage}
 \alias{longbet_encourage}
-\title{Joint reduced forms for randomized encouragement}
+\title{The adoption-clock model for a randomized encouragement experiment}
 \usage{
 longbet_encourage(y, d, z, x, t = NULL, x_trt = NULL,
-  first_stage, outcome = "continuous", config = list(), verbose = FALSE,
-  engine = "longbet", direct_config = list())
+  outcome = "continuous", config = list(), verbose = FALSE)
 }
 \arguments{
 \item{y}{Complete numeric outcome matrix, N by T.}
@@ -12,34 +11,28 @@ longbet_encourage(y, d, z, x, t = NULL, x_trt = NULL,
 \item{x}{Baseline covariate matrix, N by P.}
 \item{t}{Increasing calendar vector with whole-unit gaps; defaults to 1:T.}
 \item{x_trt}{Optional baseline treatment-forest covariates.}
-\item{first_stage}{Required choice: \code{"lpm"} or \code{"probit"}.}
-\item{outcome}{\code{"continuous"} or \code{"binary"} for y.}
-\item{config}{Named list of Python LongBetConfig sampler options, such as
-num_chains, num_sweeps, num_burnin, random_seed and variance priors. Unspecified
-innovation priors use proper IG(2,1); explicit improper priors are rejected.}
+\item{outcome}{\code{"continuous"} or \code{"binary"} for y; adoption is always a
+binary hazard.}
+\item{config}{Named list of Python LongBetConfig sampler options applied to both
+equations, such as num_chains, num_sweeps, num_burnin and random_seed.}
 \item{verbose}{Whether to print a fitting message.}
-\item{engine}{\code{"longbet"} or \code{"direct_smooth"}. The latter uses Gaussian
-smooth stump leaves and supports only continuous outcomes, an LPM first stage,
-and predictions for the all-unit target. Its \code{config} accepts only
-num_chains, num_burnin, num_sweeps, n_skip, and random_seed.}
-\item{direct_config}{Named list of DirectSmoothConfig forest and prior options
-for \code{engine = "direct_smooth"}. Set \code{correlated_intercepts = TRUE}
-to estimate a covariance between the two equations' unit intercepts.}
 }
-\description{Fits Y and actual adoption jointly on assigned encouragement using
-the Python engine, for one encouragement wave and a permanent control arm.}
-\details{Prediction averages both ITTs over all original study units using equal
-weights. Probit uses probability differences. Neither first-stage model is a
-calibrated default. For \code{engine = "longbet"}, SUR couples innovations when a continuous equation is
-present; unit-intercept priors are independent across equations. With binary Y
-and a probit first stage, both innovation-loading rows are fixed at zero, so
-\code{sur = TRUE} does not couple innovations. These equations are independent
-by default. Optional shared treatment trees couple forest uncertainty only;
-they do not introduce correlated binary innovations or unit intercepts.
-The Wald ratio needs exclusion, monotonicity, relevance and
-appropriate adoption-history assumptions for a CACE interpretation.}
+\description{Fits two LongBet equations and composes them: the outcome on the
+observed adoption clock (periods since adoption, both arms contributing adoption
+events) and adoption as a discrete-time hazard on the offer clock, with the unit
+intercept of the hazard acting as a frailty. The offer's effects on the outcome
+and on adoption follow by composition, integrating the frailty outside the
+survival product.}
+\details{This uses the exclusion restriction and assumes adoption timing is not
+confounded with the outcome innovations given covariates and the unit intercept.
+The design-based reference returned by \code{predict()} needs neither assumption
+and is the check on the population offer effects. Both ITTs average over all
+original study units with equal weights and each unit's own fitted intercepts.
+The Wald ratio needs exclusion, monotonicity, relevance and appropriate
+adoption-history assumptions for a CACE interpretation.}
 \value{A longbet_encourage object containing a versioned raw archive, configuration
-and metadata. The archive includes original outcomes, adoption, assignment and
-covariates, retaining the original target. No live Python handles are stored;
+and metadata. The archive includes both fitted equations and the original
+outcomes, adoption, assignment and covariates. No live Python handles are stored;
 the object survives saveRDS and readRDS in a fresh R session.}
-\seealso{\code{\link{predict.longbet_encourage}}, \code{\link{encouragement_effects}}}
+\seealso{\code{\link{predict.longbet_encourage}}, \code{\link{predict_conditional}},
+\code{\link{encouragement_effects}}}

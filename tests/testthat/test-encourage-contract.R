@@ -20,7 +20,6 @@ test_that("encouragement model and design formals match the shared contract", {
   check_defaults(longbet_encourage, model$r_fit$defaults)
   expect_setequal(names(formals(longbet_encourage)),
                   c(model$r_fit$required, names(model$r_fit$defaults)))
-  expect_identical(formals(longbet_encourage)$first_stage, quote(expr = ))
   check_defaults(getS3method("predict", "longbet_encourage"), model$r_predict$defaults)
   expect_setequal(names(formals(getS3method("predict", "longbet_encourage"))),
                   c(model$r_predict$required, names(model$r_predict$defaults), "..."))

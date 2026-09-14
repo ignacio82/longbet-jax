@@ -35,7 +35,6 @@ from longbet._loop import LongBetTrace
 from longbet._multi_loop import MultiLongBetTrace
 from longbet._multi_input import resolve_category_counts
 from longbet._sur import SAMPLER_SEMANTICS
-from longbet._shared_forest import SHARED_SAMPLER_SEMANTICS
 
 if TYPE_CHECKING:
     from longbet._multi_model import LongBetMulti, OutcomeList
@@ -55,7 +54,6 @@ def _validate_archive(data: Any, meta: dict[str, Any], config: LongBetConfig) ->
     require(len(set(names)) == M, "duplicate outcome names.")
     require(len(types) == M and all(t in ("continuous", "binary", "ordinal") for t in types), "invalid outcome types.")
     ordinal = "ordinal" in types
-    config.validate_multi_variance_prior(tuple(types))
     order = meta.get("order", [])
     inverse = meta.get("inverse_order", [])
     require(len(order) == M and all(type(i) is int for i in order) and sorted(order) == list(range(M)), "invalid order permutation.")
@@ -76,11 +74,9 @@ def _validate_archive(data: Any, meta: dict[str, Any], config: LongBetConfig) ->
     require(fitted_t.shape == (meta["T"],) and np.all(np.isfinite(fitted_t)) and np.all(np.diff(fitted_t) > 0), "invalid fitted_t.")
     require(meta.get("sur_active") == config.sur_active, "SUR settings disagree with config.")
     require(meta.get("sur_prior_var") == config.sur_prior_var, "SUR prior disagrees with config.")
-    sharing = config.num_shared_trees > 0
-    expected_semantics = SHARED_SAMPLER_SEMANTICS if sharing else SAMPLER_SEMANTICS
-    require(meta.get("sampler_semantics") == expected_semantics,
+    require(meta.get("sampler_semantics") == SAMPLER_SEMANTICS,
             "unsupported sampler semantics.")
-    require(meta.get("format_version", 1) == (3 if ordinal else 2 if sharing else 1), "format does not match ordinal outcomes/treatment sharing.")
+    require(meta.get("format_version", 1) == (3 if ordinal else 1), "format does not match ordinal outcomes.")
     if ordinal:
         require(type(meta.get("ordinal_schema_version")) is int and
                 meta["ordinal_schema_version"] == ORDINAL_SCHEMA_VERSION, "unsupported ordinal schema.")
@@ -91,11 +87,6 @@ def _validate_archive(data: Any, meta: dict[str, Any], config: LongBetConfig) ->
         require(meta["internal_num_categories"] == [counts[i] for i in order],
                 "internal category counts disagree with order.")
         require(len(meta.get("ordinal_metadata", [])) == M, "missing per-outcome ordinal metadata.")
-    if sharing:
-        require(meta.get("num_shared_trees") == config.num_shared_trees and
-                meta.get("shared_variance_fraction") == config.shared_variance_fraction,
-                "shared/private prior settings disagree with config.")
-        require(meta.get("treatment_tree_layout") == "private_then_shared", "unknown treatment tree layout.")
     require(meta.get("rng_scheme_version") == 1, "unsupported RNG scheme.")
     chains = config.num_chains > 1
     require(meta.get("has_chains") is chains, "chain metadata disagrees with config.")
@@ -136,16 +127,11 @@ def _validate_archive(data: Any, meta: dict[str, Any], config: LongBetConfig) ->
                 # Offsets and leaf units are shared constants, not traces.
                 expected_prefix = () if key in ("offset", "leaf_unit") else draw_shape
                 require(a.shape[:len(expected_prefix)] == expected_prefix and np.all(np.isfinite(a)), f"invalid draw axes or non-finite values in {name}.")
-                if (sharing or ordinal) and key in ("leaf_tree", "var_tree", "split_tree"):
+                if ordinal and key in ("leaf_tree", "var_tree", "split_tree"):
                     J = config.num_trees_pr if forest == "mu" else config.num_trees_trt
                     depth = config.max_depth_pr if forest == "mu" else config.max_depth_trt
                     slots = 2**depth if key == "leaf_tree" else 2**(depth-1)
                     require(a.shape == (*draw_shape, J, slots), f"invalid combined forest shape in {name}.")
-                    if sharing and forest == "nu" and key != "leaf_tree" and m > 0:
-                        first = np.asarray(data[f"outcome_0_nu_{key}"])
-                        require(np.array_equal(a[..., -config.num_shared_trees:, :],
-                                               first[..., -config.num_shared_trees:, :]),
-                                "shared topology differs across outcomes; joint draw alignment is invalid.")
 
 
 def save_multi_npz(model: LongBetMulti, path: str | Path) -> None:
@@ -169,7 +155,7 @@ def save_multi_npz(model: LongBetMulti, path: str | Path) -> None:
 
     meta: dict[str, Any] = {
         "model_kind": "multi",
-        "format_version": 3 if "ordinal" in model.outcome else 2 if model.config.num_shared_trees else 1,
+        "format_version": 3 if "ordinal" in model.outcome else 1,
         "precision_cache_version": PRECISION_CACHE_VERSION,
         "M": M,
         "outcome_names": list(model.outcome_names),
@@ -183,9 +169,6 @@ def save_multi_npz(model: LongBetMulti, path: str | Path) -> None:
         "offset_": [float(x) for x in model.offset_],
         "sur_active": bool(model.sur_active),
         "sur_prior_var": float(model.config.sur_prior_var),
-        "num_shared_trees": model.config.num_shared_trees,
-        "shared_variance_fraction": model.config.shared_variance_fraction,
-        "treatment_tree_layout": "private_then_shared",
         "sampler_semantics": str(model.sampler_semantics),
         "rng_scheme_version": int(model.rng_scheme_version),
         "provenance": str(model.provenance),
@@ -292,7 +275,6 @@ def load_multi_npz(path: str | Path) -> LongBetMulti:
     multi_trace = MultiLongBetTrace(
         traces=tuple(child_traces),
         gamma_loadings=gamma_loadings,
-        num_shared_trees=config.num_shared_trees,
     )
 
     model = LongBetMulti(config)
@@ -325,7 +307,7 @@ def load_multi_npz(path: str | Path) -> LongBetMulti:
     for u in range(M):
         internal_idx = model.inverse_order[u]
         child_otype = model.outcome[u]
-        child_cfg = dataclasses.replace(config, outcome=child_otype, num_shared_trees=0,
+        child_cfg = dataclasses.replace(config, outcome=child_otype,
                                          num_categories=model.num_categories[u])
 
         child_model = LongBet(child_cfg)

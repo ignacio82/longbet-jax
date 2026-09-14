@@ -31,6 +31,7 @@ from bartz.mcmcstep import State
 
 from longbet._state import LongBetState
 from longbet._step import _load, longbet_step
+from longbet._tempering import select_replicas, swap_step
 
 
 class LongBetTrace(eqx.Module):
@@ -65,6 +66,8 @@ class RunLongBetResult(NamedTuple):
     final_state: LongBetState
     main_trace: LongBetTrace
     burnin_trace: LongBetBurninTrace | None
+    #: Per replica, accepted exchanges with the next level (tempered runs only).
+    swap_accepts: Any = None
 
 
 class _MCMCCarry(eqx.Module):
@@ -85,6 +88,7 @@ class _MCMCCarry(eqx.Module):
     sigma2_trace: Float32[Array, '...']
     sigma_gamma2_trace: Float32[Array, '...']
     cutpoints_trace: Float32[Array, '...'] | None
+    swap_accepts: Float32[Array, '...'] | None
 
 
 def _make_views(state: LongBetState) -> tuple[State, State]:
@@ -187,10 +191,16 @@ def run_longbet_mcmc(
     n_burn_i, n_save_i, n_skip_i = int(n_burn), int(n_save), int(n_skip)
     n_iters = n_burn_i + n_skip_i * n_save_i
 
-    chains = state.beta.shape[:-1]
+    # Tempered runs carry every replica in the state but save only the
+    # posterior (beta = 1) replicas, so memory does not scale with the ladder.
+    levels = int(state.tempering_levels)
+    tempered = state.has_chain_axis and levels > 1
+    cold_idx = jnp.arange(0, state.num_chains, levels) if tempered else None
+    cold = (lambda st: select_replicas(st, cold_idx)) if tempered else (lambda st: st)
+    chains = cold(state).beta.shape[:-1]
     sample_axis = 1 if chains else 0
 
-    view_mu_init, view_nu_init = _make_views(state)
+    view_mu_init, view_nu_init = _make_views(cold(state))
 
     carry = _MCMCCarry(
         state=state,
@@ -209,6 +219,7 @@ def run_longbet_mcmc(
         sigma_gamma2_trace=jnp.zeros((*chains, n_save_i), jnp.float32),
         cutpoints_trace=(jnp.zeros((*chains, n_save_i, state.num_categories - 2), jnp.float32)
                          if state.outcome_type_str == "ordinal" else None),
+        swap_accepts=jnp.zeros((state.num_chains,), jnp.float32) if tempered else None,
     )
 
     inner_length = n_iters if inner_loop_length is None else max(1, int(inner_loop_length))
@@ -221,8 +232,14 @@ def run_longbet_mcmc(
 
         def body_fn(carry_in: _MCMCCarry) -> _MCMCCarry:
             key_step, key_next = random.split(carry_in.key)
-            new_state = longbet_step(key_step, carry_in.state)
+            key_swap = random.fold_in(key_step, 4242)  # keeps the untempered stream unchanged
             i = carry_in.i_total
+            new_state = longbet_step(key_step, carry_in.state)
+            swap_accepts = carry_in.swap_accepts
+            if tempered:
+                new_state, accepted = swap_step(key_swap, new_state, i)
+                swap_accepts = swap_accepts + accepted.astype(jnp.float32)
+            cold_state = cold(new_state)
 
             is_burn = i < n_burn_i
             burnin_idx = jnp.where(is_burn, i, noop_idx)
@@ -231,7 +248,7 @@ def run_longbet_mcmc(
             is_save = (~is_burn) & (((i_from_burn + 1) % n_skip_i) == 0)
             main_idx = jnp.where(is_save, i_from_burn // n_skip_i, noop_idx)
 
-            v_mu, v_nu = _make_views(new_state)
+            v_mu, v_nu = _make_views(cold_state)
 
             return _MCMCCarry(
                 state=new_state,
@@ -241,18 +258,19 @@ def run_longbet_mcmc(
                 nu_burnin=_set(carry_in.nu_burnin, burnin_idx, BurninTrace.from_state(v_nu)),
                 mu_main=_set(carry_in.mu_main, main_idx, MainTrace.from_state(v_mu)),
                 nu_main=_set(carry_in.nu_main, main_idx, MainTrace.from_state(v_nu)),
-                beta_trace=_set_param(carry_in.beta_trace, main_idx, new_state.beta, sample_axis),
-                gamma_trace=_set_param(carry_in.gamma_trace, main_idx, new_state.gamma, sample_axis),
-                b0_trace=_set_param(carry_in.b0_trace, main_idx, new_state.b0, sample_axis),
-                b1_trace=_set_param(carry_in.b1_trace, main_idx, new_state.b1, sample_axis),
-                alpha_trace=_set_param(carry_in.alpha_trace, main_idx, new_state.alpha, sample_axis),
-                sigma2_trace=_set_param(carry_in.sigma2_trace, main_idx, new_state.sigma2, sample_axis),
+                beta_trace=_set_param(carry_in.beta_trace, main_idx, cold_state.beta, sample_axis),
+                gamma_trace=_set_param(carry_in.gamma_trace, main_idx, cold_state.gamma, sample_axis),
+                b0_trace=_set_param(carry_in.b0_trace, main_idx, cold_state.b0, sample_axis),
+                b1_trace=_set_param(carry_in.b1_trace, main_idx, cold_state.b1, sample_axis),
+                alpha_trace=_set_param(carry_in.alpha_trace, main_idx, cold_state.alpha, sample_axis),
+                sigma2_trace=_set_param(carry_in.sigma2_trace, main_idx, cold_state.sigma2, sample_axis),
                 sigma_gamma2_trace=_set_param(
-                    carry_in.sigma_gamma2_trace, main_idx, new_state.sigma_gamma2, sample_axis
+                    carry_in.sigma_gamma2_trace, main_idx, cold_state.sigma_gamma2, sample_axis
                 ),
                 cutpoints_trace=(_set_param(carry_in.cutpoints_trace, main_idx,
-                                           new_state.cutpoints, sample_axis)
+                                           cold_state.cutpoints, sample_axis)
                                  if carry_in.cutpoints_trace is not None else None),
+                swap_accepts=swap_accepts,
             )
 
         return lax.while_loop(cond_fn, body_fn, c)
@@ -283,4 +301,4 @@ def run_longbet_mcmc(
         if n_burn_i > 0
         else None
     )
-    return RunLongBetResult(carry.state, main_trace, burnin_trace)
+    return RunLongBetResult(carry.state, main_trace, burnin_trace, carry.swap_accepts)

@@ -65,15 +65,3 @@
   }
   invisible(NULL)
 }
-.check_shared_treatment_options <- function(num_shared_trees, shared_variance_fraction) {
-  if (!is.numeric(num_shared_trees) || length(num_shared_trees) != 1L ||
-      !is.finite(num_shared_trees) || num_shared_trees < 0 ||
-      num_shared_trees != floor(num_shared_trees)) {
-    stop("num_shared_trees must be a nonnegative integer scalar.", call. = FALSE)
-  }
-  if (!is.numeric(shared_variance_fraction) || length(shared_variance_fraction) != 1L ||
-      !is.finite(shared_variance_fraction) || shared_variance_fraction <= 0 ||
-      shared_variance_fraction >= 1) {
-    stop("shared_variance_fraction must be a finite scalar strictly between 0 and 1.", call. = FALSE)
-  }
-}

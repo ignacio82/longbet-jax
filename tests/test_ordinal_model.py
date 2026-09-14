@@ -32,7 +32,7 @@ def ordinal_config(K=4, **kwargs):
     settings = dict(outcome="ordinal", num_categories=K, num_chains=1,
         num_trees_pr=2, num_trees_trt=2, max_depth_pr=3, max_depth_trt=3,
         min_points_per_leaf_pr=2, min_points_per_leaf_trt=2,
-        num_burnin=3, num_sweeps=5, n_skip=2, device="cpu", sample_alpha=True)
+        num_burnin=3, num_sweeps=5, n_skip=2, device="cpu")
     settings.update(kwargs)
     return LongBetConfig(**settings)
 

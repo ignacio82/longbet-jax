@@ -129,10 +129,10 @@ def test_ordinal_latent_uses_sur_conditional_mean_and_variance():
     assert float(updated.sigma2) == 1
 
 
-@pytest.fixture(scope="module", params=[0, 1])
-def fitted_multi(request):
+@pytest.fixture(scope="module")
+def fitted_multi():
     panel = mixed_panel()
-    model = LongBetMulti(mixed_config(num_shared_trees=request.param)).fit(**panel)
+    model = LongBetMulti(mixed_config()).fit(**panel)
     return model, panel
 
 
@@ -157,12 +157,6 @@ def test_joint_sampling_identification_residuals_and_prediction(fitted_multi):
         assert child.prob_y_summary.mean.shape == (12, 4, K)
         assert child.att_prob_full.shape == (2, K, 10)
         assert model[name].config.num_categories == K
-    if model.config.num_shared_trees:
-        for tr in model.trace.traces[1:]:
-            np.testing.assert_array_equal(tr.nu_trace.var_tree[..., -1:, :],
-                                          model.trace.traces[0].nu_trace.var_tree[..., -1:, :])
-            np.testing.assert_array_equal(tr.nu_trace.split_tree[..., -1:, :],
-                                          model.trace.traces[0].nu_trace.split_tree[..., -1:, :])
 
 
 def test_sur_off_sharing_off_matches_scalar_steps():
@@ -245,14 +239,13 @@ def test_joint_archive_rejects_malformed_ordinal(fitted_multi, tmp_path, corrupt
         LongBetMulti.load(path)
 
 
-@pytest.mark.parametrize("shared", [0, 1])
-def test_two_category_joint_archives_keep_empty_threshold_axes(tmp_path, shared):
+def test_two_category_joint_archives_keep_empty_threshold_axes(tmp_path):
     panel = ordinal_panel(2)
     data = dict(y={"rating": panel["y"], "binary": panel["y"].copy()},
                 x=panel["x"], z=panel["z"], t=panel["t"],
                 outcome=["ordinal", "binary"], num_categories=[2, None])
     model = LongBetMulti(mixed_config(num_chains=1, num_sweeps=1,
-        num_burnin=1, num_shared_trees=shared)).fit(**data)
+        num_burnin=1)).fit(**data)
     path = tmp_path / "binary-limit.npz"
     model.save(path)
     loaded = LongBetMulti.load(path)

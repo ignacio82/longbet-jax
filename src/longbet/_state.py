@@ -55,7 +55,7 @@ from bartz.mcmcstep._axes import CHAIN_AXIS
 from longbet._config import LongBetConfig
 from longbet._gp import build_kernel_matrix, kernel_cholesky
 from longbet._ordinal import full_cutpoints, prepare_ordinal, sample_ordinal_latents
-from longbet._shared_forest import enable_x64
+from longbet._x64 import enable_x64
 
 #: Which leaves carry a chain axis is **not** hardcoded here.  ``bartz``
 #: annotates it on its own dataclass fields (``field(chains=CHAIN_AXIS)``), and
@@ -127,21 +127,24 @@ class LongBetState(State):
     # --- fields with defaults ------------------------------------------------
     resid_eff_scale_nu: Any = field(chains=CHAIN_AXIS, default=None)
     resid_inexact_integral_nu: Any = field(chains=CHAIN_AXIS, default=None)
-    sample_alpha: bool = field(static=True, default=False)
     sample_beta: bool = field(static=True, default=True)
-    adaptive_coding: bool = field(static=True, default=True)
     random_intercept: bool = field(static=True, default=True)
-    ridge_move: bool = field(static=True, default=True)
-    ridge_proposal_sigma: float = field(static=True, default=0.2)
     gamma_prior_a: float = field(static=True, default=1.0)
     gamma_prior_b: float = field(static=True, default=0.1)
-    sigma_prior_a: float = field(static=True, default=0.0)
-    sigma_prior_b: float = field(static=True, default=0.0)
-    sigma_b: float = field(static=True, default=0.7071067811865476)
-    sigma_alpha: float = field(static=True, default=1.0)
+    sigma_prior_a: float = field(static=True, default=2.0)
+    sigma_prior_b: float = field(static=True, default=1.0)
     outcome_type_str: str = field(static=True, default="continuous")
     num_categories: int = field(static=True, default=0)
     cutpoint_prior_scale: float = field(static=True, default=5.0)
+    #: Inverse temperature of each replica (1 = the posterior). Per chain.
+    temperature: Any = field(chains=CHAIN_AXIS, default=None)
+    tempering_levels: int = field(static=True, default=1)
+    tempering_beta_min: float = field(static=True, default=0.05)
+
+    @property
+    def is_tempered(self) -> bool:
+        """Whether the sweep must run against a tempered likelihood."""
+        return self.tempering_levels > 1
 
     @property
     def has_chain_axis(self) -> bool:
@@ -296,15 +299,10 @@ def _overdisperse_chains(
         gamma = state.gamma
         resid = state.resid
 
-    # b0, b1 ~ N(their starting value, sigma_b): a spread around the coding the
-    # user asked for, not a different model.
-    if state.adaptive_coding:
-        b_noise = jax.random.normal(k_b, (2, num_chains), jnp.float32) * state.sigma_b
-        b0 = state.b0 + b_noise[0]
-        b1 = state.b1 + b_noise[1]
-    else:
-        b0 = state.b0
-        b1 = state.b1
+    # The coding scales are fixed (b0 = 0, b1 = 1): nothing to disperse.
+    del k_b
+    b0 = state.b0
+    b1 = state.b1
 
     state = eqx.tree_at(
         lambda s: (s.beta, s.gamma, s.sigma2, s.sigma_gamma2, s.b0, s.b1, s.resid),
@@ -408,13 +406,12 @@ def init_longbet(
     leaf_prior_cov_inv_mu = jnp.array(1.0 / sigma_mu**2, dtype=jnp.float32)
     leaf_prior_cov_inv_nu = jnp.array(1.0 / sigma_nu**2, dtype=jnp.float32)
 
-    # Adaptive coding: XBCF's antisymmetric start. When it is off, b0 = b1 = 1,
-    # as specified by the public API. Treatment-only coding (b0 = 0) changes
-    # both the model and its counterfactual contrast.
-    if config.adaptive_coding:
-        b0_init, b1_init = -0.5, 0.5
-    else:
-        b0_init, b1_init = 1.0, 1.0
+    # Treatment-only coding, fixed: the treatment term beta_S * nu enters
+    # treated cells only, the untreated surface is mu + gamma, and beta_0 is
+    # prior-only. (Adaptive coding scales were removed: they add an untreated
+    # term b0 * beta_0 * nu(x, t) that competes with mu on every untreated cell
+    # and enters the reported effect, a slow, effect-relevant ridge.)
+    b0_init, b1_init = 0.0, 1.0
 
     beta_init = jnp.ones(S_max + 1, dtype=jnp.float32)
     b_z_init = jnp.where(z_vec == 1.0, b1_init, b0_init)
@@ -510,7 +507,6 @@ def init_longbet(
         kernel_type=config.kernel_type,
         sigma_m=config.sigma_m,
         gp_constant_mean=config.gp_constant_mean,
-        jitter=config.gp_jitter,
     )
     K_chol = jnp.asarray(kernel_cholesky(K_tilde), dtype=jnp.float32)
 
@@ -579,18 +575,15 @@ def init_longbet(
         K_chol=K_chol,
         resid_eff_scale_nu=state_nu.resid_eff_scale,
         resid_inexact_integral_nu=state_nu.resid_inexact_integral,
-        sample_alpha=config.sample_alpha,
         sample_beta=config.sample_beta,
-        adaptive_coding=config.adaptive_coding,
         random_intercept=config.random_intercept,
-        ridge_move=config.ridge_move,
-        ridge_proposal_sigma=config.ridge_proposal_sigma,
+        temperature=jnp.array(1.0, dtype=jnp.float32),
+        tempering_levels=int(config.tempering_levels),
+        tempering_beta_min=float(config.tempering_beta_min),
         gamma_prior_a=config.gamma_prior_a,
         gamma_prior_b=config.gamma_prior_b,
         sigma_prior_a=config.sigma_prior_a,
         sigma_prior_b=config.sigma_prior_b,
-        sigma_b=config.sigma_b,
-        sigma_alpha=config.sigma_alpha,
         outcome_type_str=config.outcome,
         num_categories=(config.num_categories if config.outcome == "ordinal"
                         else 2 if is_binary else 0),
@@ -607,4 +600,13 @@ def init_longbet(
 
     if num_chains is not None and num_chains > 1:
         state = broadcast_to_chains(state, int(num_chains), key=chain_key)
+    if config.tempering_levels > 1 and state.has_chain_axis:
+        # A single-chain state (e.g. a child of the coupled sampler) gets its
+        # ladder once the caller has broadcast it to replicas.
+        from longbet._tempering import ladder_temperatures
+        if state.num_chains % config.tempering_levels:
+            raise ValueError("tempering needs num_chains * tempering_levels replicas")
+        state = eqx.tree_at(lambda s: s.temperature, state,
+                            ladder_temperatures(state.num_chains, config.tempering_levels,
+                                                config.tempering_beta_min))
     return state

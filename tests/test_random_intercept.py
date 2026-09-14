@@ -22,7 +22,7 @@ from _panels import make_staggered_panel
 
 def test_recovers_unobserved_unit_levels():
     data = make_staggered_panel(seed=20260905, N=150, T=8, gamma_sd=1.0, noise=0.25)
-    model = LongBet(LongBetConfig(num_sweeps=40, num_burnin=20, num_trees_pr=10,
+    model = LongBet(LongBetConfig(num_sweeps=100, num_burnin=100, num_trees_pr=10,
                                   num_trees_trt=10, random_intercept=True,
                                   num_chains=1, random_seed=42))
     model.fit(y=data["y"], x=data["x"], z=data["z"], t=data["t"])

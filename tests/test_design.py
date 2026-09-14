@@ -151,17 +151,37 @@ def test_x_trt_gives_the_treatment_forest_its_own_columns():
 
 
 def test_split_time_flags_apply_to_their_own_forest():
-    """split_time_ps governs mu; split_time_trt governs nu's exposure index."""
+    """split_time_ps governs mu; the exposure index is never visible to nu."""
     x, y, z, t = _panel()
     model = LongBet(LongBetConfig(num_sweeps=4, num_burnin=2, num_trees_pr=4,
                                   num_trees_trt=4, split_time_ps=False,
-                                  split_time_trt=False, num_chains=1, random_seed=1))
+                                  num_chains=1, random_seed=1))
     model.fit(y=y, x=x, z=z, t=t)
     by_name = {b.name: b for b in model.design_.blocks}
     assert not by_name["t"].mu_visible, "split_time_ps=False must blind mu to time"
     assert by_name["t"].nu_visible, "the treatment forest still sees calendar time"
-    assert not by_name["s"].nu_visible, "split_time_trt=False must blind nu to S"
+    assert not by_name["s"].nu_visible, "nu never sees the exposure index"
     assert not by_name["s"].mu_visible, "mu is never shown the exposure index"
+
+
+def test_split_calendar_trt_blinds_only_the_treatment_forest():
+    """split_calendar_trt=False removes calendar time from nu and leaves mu alone."""
+    x, y, z, t = _panel()
+    model = LongBet(LongBetConfig(num_sweeps=4, num_burnin=2, num_trees_pr=4,
+                                  num_trees_trt=4,
+                                  split_calendar_trt=False, num_chains=1, random_seed=1))
+    model.fit(y=y, x=x, z=z, t=t)
+    by_name = {b.name: b for b in model.design_.blocks}
+    assert by_name["t"].mu_visible, "the prognostic forest still sees calendar time"
+    assert not by_name["t"].nu_visible, "split_calendar_trt=False must blind nu to t"
+    assert not by_name["s"].nu_visible
+    max_split = model.design_.max_split_nu
+    assert (max_split[-2:] == 0).all(), "both time columns are blocked for nu"
+    assert (max_split[:-2] > 0).all(), "covariate columns stay available to nu"
+    pred = model.predict(x, z, t=t, summary_only=True)
+    assert np.all(np.isfinite(pred.tau_summary.mean))
+    with pytest.raises(ValueError, match="split_calendar_trt"):
+        LongBetConfig(split_calendar_trt=1)
 
 
 def test_time_varying_covariates_are_routed_to_their_forest():
