@@ -85,3 +85,43 @@ against 0.48 (1.01 with two regrown trees per forest and sweep plus the CHANGE m
 or 50 treatment trees made accuracy worse (RMSE 2.0 and 1.2). The frozen chains'
 sharper estimates are not posterior summaries; the correct sampler's are, and they
 have not converged either.
+
+## Addendum (2026-09-14): CHANGE at internal nodes, and the number of treatment trees
+
+On the chapter's second example (a nudge whose effect flips sign across a step in two
+covariates, 300 units, 8 weeks) the adoption-clock model's outcome effect failed the gates
+at 4 chains x (2,000 + 6,000) sweeps: bulk ESS 57-140 and R-hat 1.025-1.05 for the
+population ITT at five of six horizons. Decoding the chains showed each one holding one
+or two `x1` cutpoints near the true threshold for the entire run, at different values
+per chain; the units whose predicted effect differed between chains were control-arm
+accounts that never adopted and sit on the threshold, whose effects only the forest prior
+places. Those cutpoints sat at internal nodes (an `x1` rule with `x2` rules below), which
+neither GROW/PRUNE nor the leaf-parent CHANGE can move.
+
+`src/longbet/_change_internal_move.py` adds a CHANGE at any nonterminal node: the tree
+shape is kept, the subtree is re-routed, and the move accepts with the exact ratio of the
+full tree prior times the leaf-integrated likelihood, with the fresh-rule proposal density
+divided out. Validation: `tests/test_change_internal_move.py` (no-op proposals are exact,
+re-routing agrees with `bartz.grove.traverse_forest`, inadmissible descendant rules get
+zero prior, residual and caches stay consistent) and a with/without comparison of the
+successive-conditional forest marginals; `tests/test_geweke.py` passes with the move in
+the sweep.
+
+Results at 4 x (1,000 + 2,000) sweeps on the same panel (18 gated quantities):
+
+| treatment trees | internal CHANGE | passed | min bulk ESS | max R-hat | units with chain disagreement > 1 |
+|---|---|---|---|---|---|
+| 20 | off | 5 | 52 | 1.069 | 17 |
+| 20 | on | 6 | 26 | 1.104 | 17 |
+| 60 | off | 16 | 487 | 1.011 | 14 |
+| 60 | on | 17 | 462 | 1.011 | 5 |
+
+The number of treatment trees is what matters: with 20 each tree carries a large share of
+the surface and the forest sits in one decomposition; with 60 the chains agree. The
+internal CHANGE removes the remaining frozen cutpoints. A steep-but-smooth boundary
+instead of a step did not help at 20 trees (8 of 18). Regrowing every tree each sweep was
+also tried and was far slower without fixing the freeze. Defaults are now 60 treatment
+trees and a maximum depth of 8 (trees are stored as heaps of `2 ** depth` nodes, so the
+cap bounds archive size; on the onboarding panel at 60 trees, depth 6 and depth 10 mixed
+alike over two seeds, and depth 10 was slightly more accurate, 0.29 against 0.32 held-out
+RMSE, so the cap stays above the depths posterior trees use).

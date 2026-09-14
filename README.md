@@ -46,13 +46,14 @@ The reported effect is the contrast between being $S$ periods into treatment
 and not being treated at all, $\tau_t(X_i, S) = \beta_S\,\nu(X_i, t)$, and the
 ATT by exposure averages it over the treated cells at that exposure. Missing
 cells (`NaN`) are marginalized, not imputed. Every sweep updates both forests
-with GROW, PRUNE, CHANGE and one data-driven REGROW proposal, then $\beta$,
+with GROW, PRUNE, CHANGE (a new rule at a leaf parent, or at any internal
+node with its subtree kept) and one data-driven REGROW proposal, then $\beta$,
 $\gamma$ and the variances, plus a Metropolis move along the exact scale ridge
 between $\beta$ and the treatment leaves. Chains start from the prior, so
 $\hat R$ measures convergence; `tempering_levels = K` runs each chain as a
 parallel-tempering ladder for posteriors whose forest modes the local moves
 connect too slowly. Defaults: 4 chains, 2,000 burn-in and 1,000 retained
-sweeps.
+sweeps, 20 prognostic and 60 treatment trees of depth at most 8.
 
 ### Python
 

@@ -5,9 +5,9 @@
 \usage{
 longbet_multi(y, x, z, t = NULL, x_trt = NULL, x_tv = NULL, x_trt_tv = NULL,
   ps = NULL, num_sweeps = 1000, num_burnin = 2000, n_skip = 1, num_chains = 4,
-  inner_loop_length = NULL, num_trees_pr = 20, num_trees_trt = 20,
+  inner_loop_length = NULL, num_trees_pr = 20, num_trees_trt = 60,
   min_points_per_leaf_pr = 10, min_points_per_leaf_trt = 10,
-  max_depth_pr = 10, max_depth_trt = 10, alpha_split_pr = 0.95,
+  max_depth_pr = 8, max_depth_trt = 8, alpha_split_pr = 0.95,
   beta_split_pr = 2, alpha_split_trt = 0.25, beta_split_trt = 3,
   num_cutpoints = 100, sig_knl = 1, lambda_knl = 1, kernel_type = "se",
   sigma_m = 1, gp_constant_mean = TRUE, split_time_ps = TRUE,

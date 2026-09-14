@@ -38,8 +38,10 @@ def test_marginal_target_is_the_same_for_study_and_new_units(fit_and_panel):
     fit, p = fit_and_panel
     study = fit.predict_conditional()
     copy = fit.predict_conditional(x=np.asarray(p["x"][:3]))
-    np.testing.assert_allclose(study.citt_y.draws[:3], copy.citt_y.draws, rtol=1e-6, atol=1e-8)
-    np.testing.assert_allclose(study.citt_d.draws[:3], copy.citt_d.draws, rtol=1e-6, atol=1e-8)
+    # Forest sums are accumulated in float32 in an order that depends on the batch of
+    # units evaluated, so agreement is to single precision, not bit-for-bit.
+    np.testing.assert_allclose(study.citt_y.draws[:3], copy.citt_y.draws, rtol=1e-5, atol=1e-7)
+    np.testing.assert_allclose(study.citt_d.draws[:3], copy.citt_d.draws, rtol=1e-5, atol=1e-7)
 
 
 def test_strata_are_probabilities_that_sum_to_one(fit_and_panel):

@@ -46,6 +46,7 @@ from bartz.mcmcstep import State, Wishart
 from bartz.mcmcstep import step as bartz_step
 from bartz.mcmcstep._step import step_z
 
+from longbet._change_internal_move import change_internal_step
 from longbet._change_move import change_step
 from longbet._regrow_move import regrow_step
 from longbet._gp import sample_beta_gp
@@ -269,6 +270,7 @@ def longbet_single_step(
         view_mu = refresh_prec_tree(view_mu)
     view_mu = bartz_step(keys[1], view_mu)
     view_mu = change_step(random.fold_in(key, 7101), view_mu)
+    view_mu = change_internal_step(random.fold_in(key, 7105), view_mu)
     view_mu = regrow_step(random.fold_in(key, 7103), view_mu, 1)
     mu_fit = current_forest_fit(view_mu.forest)
     R = jnp.where(obs_mask, R-alpha*(mu_fit-state.mu_fit), 0.)
@@ -319,6 +321,7 @@ def longbet_single_step(
     private_before = state.nu_fit
     view_nu = bartz_step(keys[4], view_nu)
     view_nu = change_step(random.fold_in(key, 7102), view_nu)
+    view_nu = change_internal_step(random.fold_in(key, 7106), view_nu)
     view_nu = regrow_step(random.fold_in(key, 7104), view_nu, 1)
     private_after = current_forest_fit(view_nu.forest)
     private_delta = private_after - private_before

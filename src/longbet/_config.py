@@ -92,11 +92,16 @@ class LongBetConfig:
     tempering_beta_min
         Inverse temperature of the hottest replica, in ``(0, 1]``.
     num_trees_pr, num_trees_trt
-        Trees in the prognostic and treatment forests.
+        Trees in the prognostic and treatment forests. The treatment forest
+        needs more trees than a prognostic one of the same size: with 20 trees
+        each tree carries a large share of a threshold surface and the chains
+        freeze at their own cutpoints; with 60 the same panel mixes.
     min_points_per_leaf_pr, min_points_per_leaf_trt
         Minimum observed cells in a leaf.
     max_depth_pr, max_depth_trt
-        Maximum tree depth.
+        Maximum tree depth. Trees are stored as heaps of ``2 ** depth`` nodes,
+        so this bounds the archive size; posterior trees under the depth prior
+        rarely exceed depth 5.
     alpha_split_pr, beta_split_pr, alpha_split_trt, beta_split_trt
         Tree-depth prior: a node at depth ``d`` splits with probability
         ``alpha / (1 + d) ** beta``. The treatment prior is shallower than the
@@ -161,11 +166,11 @@ class LongBetConfig:
 
     # --- forests -----------------------------------------------------------
     num_trees_pr: int = 20
-    num_trees_trt: int = 20
+    num_trees_trt: int = 60
     min_points_per_leaf_pr: int = 10
     min_points_per_leaf_trt: int = 10
-    max_depth_pr: int = 10
-    max_depth_trt: int = 10
+    max_depth_pr: int = 8
+    max_depth_trt: int = 8
     alpha_split_pr: float = 0.95
     beta_split_pr: float = 2.0
     alpha_split_trt: float = 0.25
