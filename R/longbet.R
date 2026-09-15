@@ -80,8 +80,13 @@
 #'   level rather than to zero.
 #' @param split_time_ps Whether the *prognostic* forest may split on calendar time.
 #' @param split_calendar_trt Whether the *treatment* forest may split on calendar
-#'   time. The forest never splits on the exposure clock: `beta_S` carries the
-#'   whole exposure profile, which is what keeps the product identified.
+#'   time.
+#' @param split_exposure_trt Whether the *treatment* forest may also split on the
+#'   exposure clock. Off by default: `beta_S` carries the whole exposure profile,
+#'   which keeps the product `beta_S * nu` identified. Turn it on when different
+#'   kinds of units need genuinely different shapes over exposure, and read the
+#'   diagnostics, because the extra freedom is a ridge between the trajectory and
+#'   the forest.
 #'   Calendar splits let the effect differ by period in staggered designs; with
 #'   a single launch cohort, calendar time and exposure coincide on treated
 #'   cells and they add nothing.
@@ -127,6 +132,7 @@ longbet <- function(y, x, z, t = NULL,
                     sig_knl = 1.0, lambda_knl = 1.0, kernel_type = "se",
                     sigma_m = 1.0, gp_constant_mean = TRUE,
                     split_time_ps = TRUE, split_calendar_trt = TRUE,
+                    split_exposure_trt = FALSE,
                     random_intercept = TRUE,
                     gamma_prior_a = 1.0, gamma_prior_b = 0.1,
                     sigma_prior_a = 2.0, sigma_prior_b = 1.0,
@@ -186,6 +192,7 @@ longbet <- function(y, x, z, t = NULL,
     gp_constant_mean = as.logical(gp_constant_mean),
     split_time_ps = as.logical(split_time_ps),
     split_calendar_trt = as.logical(split_calendar_trt),
+    split_exposure_trt = as.logical(split_exposure_trt),
     random_intercept = as.logical(random_intercept),
     gamma_prior_a = as.numeric(gamma_prior_a),
     gamma_prior_b = as.numeric(gamma_prior_b),

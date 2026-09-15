@@ -11,7 +11,8 @@ longbet(y, x, z, t = NULL, x_trt = NULL, x_tv = NULL, x_trt_tv = NULL,
   beta_split_pr = 2, alpha_split_trt = 0.25, beta_split_trt = 3,
   num_cutpoints = 100, sig_knl = 1, lambda_knl = 1, kernel_type = "se",
   sigma_m = 1, gp_constant_mean = TRUE, split_time_ps = TRUE,
-  split_calendar_trt = TRUE, random_intercept = TRUE, gamma_prior_a = 1,
+  split_calendar_trt = TRUE, split_exposure_trt = FALSE, random_intercept = TRUE,
+  gamma_prior_a = 1,
   gamma_prior_b = 0.1, sigma_prior_a = 2, sigma_prior_b = 1,
   outcome = c("continuous", "binary", "ordinal"), tempering_levels = 1,
   tempering_beta_min = 0.05, standardize = TRUE, random_seed = 0,
@@ -54,9 +55,14 @@ level rather than to zero.}
 \item{split_time_ps}{Whether the \emph{prognostic} forest may split on calendar
 time.}
 \item{split_calendar_trt}{Whether the \emph{treatment} forest may split on
-calendar time. The forest never splits on the exposure clock: \code{beta_S}
-carries the whole exposure profile. Calendar splits let the effect differ by
-period in staggered designs.}
+calendar time.}
+
+\item{split_exposure_trt}{Whether the \emph{treatment} forest may also split on
+the exposure clock. Off by default: \code{beta_S} carries the whole exposure
+profile, which keeps the product \code{beta_S * nu} identified. Turn it on when
+different kinds of units need genuinely different shapes over exposure, and
+read the diagnostics, because the extra freedom is a ridge between the
+trajectory and the forest.}
 \item{random_intercept}{Whether to fit unit random intercepts.}
 \item{gamma_prior_a, gamma_prior_b}{Inverse-gamma prior on the unit-intercept
 variance.}

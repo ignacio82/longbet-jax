@@ -119,12 +119,14 @@ class LongBetConfig:
     split_time_ps
         Whether the prognostic forest may split on calendar time.
     split_calendar_trt
-        Whether the treatment forest may split on calendar time. The forest
-        never splits on the exposure clock: the trajectory ``beta_S`` carries
-        the whole exposure profile, which is what makes the product
-        ``beta_S * nu`` identified. Calendar splits let the effect differ by
-        period in staggered designs; with a single launch cohort, calendar
-        time and exposure coincide on treated cells and the splits add nothing.
+        Whether the treatment forest may split on calendar time.
+    split_exposure_trt
+        Whether the treatment forest may also split on the exposure clock.
+        Off by default: the trajectory ``beta_S`` carries the whole exposure
+        profile, which keeps the product ``beta_S * nu`` identified. Turn it
+        on when different kinds of units need genuinely different shapes over
+        exposure, and read the diagnostics: the extra freedom is an
+        exposure-shape ridge between the trajectory and the forest.
     random_intercept
         Whether to fit unit random intercepts ``gamma_i``.
     gamma_prior_a, gamma_prior_b
@@ -187,6 +189,7 @@ class LongBetConfig:
     # --- structure ---------------------------------------------------------
     split_time_ps: bool = True
     split_calendar_trt: bool = True
+    split_exposure_trt: bool = False
 
     # --- priors ------------------------------------------------------------
     random_intercept: bool = True
@@ -241,6 +244,12 @@ class LongBetConfig:
                      "min_points_per_leaf_trt", "max_depth_pr", "max_depth_trt", "num_cutpoints"):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
+        if self.num_cutpoints > 255:
+            raise ValueError(
+                f"num_cutpoints must be at most 255, got {self.num_cutpoints}: the design "
+                "stores split indices as unsigned 8-bit integers and the REGROW proposal "
+                "scores every cutpoint of every variable at every node"
+            )
         for name in ("alpha_split_pr", "alpha_split_trt"):
             value = getattr(self, name)
             if not (isinstance(value, Real) and 0 < value < 1):
@@ -249,7 +258,7 @@ class LongBetConfig:
             value = getattr(self, name)
             if not (isinstance(value, Real) and math.isfinite(value) and value >= 0):
                 raise ValueError(f"{name} must be a finite nonnegative scalar, got {value!r}")
-        for name in ("split_time_ps", "split_calendar_trt", "random_intercept", "gp_constant_mean",
+        for name in ("split_time_ps", "split_calendar_trt", "split_exposure_trt", "random_intercept", "gp_constant_mean",
                      "sample_beta", "standardize", "sur"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean")

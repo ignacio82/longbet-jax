@@ -619,9 +619,11 @@ class LongBet:
         self.trace = result.main_trace
         self.swap_accepts_ = (None if result.swap_accepts is None
                               else np.asarray(result.swap_accepts))
-        if self.config.outcome == "ordinal":
-            # Surface checked interval failures before returning a fitted model.
-            jax.block_until_ready((self.state.z, self.trace.cutpoints))
+        # JAX dispatches the sampler asynchronously. Block here so that a
+        # returned model is a finished one: timings measured around fit() are
+        # honest, and an ordinal fit surfaces checked interval failures now
+        # rather than at the first prediction.
+        jax.block_until_ready((self.state, self.trace))
         return self
 
     # -- design construction ------------------------------------------------
@@ -734,12 +736,16 @@ class LongBet:
                 nu_visible=cfg.split_calendar_trt,
             )
         )
-        # Exposure index: visible to neither forest. The trajectory beta_S
-        # carries the whole exposure profile; letting nu split on S would give
-        # the product beta_S * nu(x, S) an unidentified exposure-shape ridge.
+        # Exposure index: never visible to the prognostic forest. By default
+        # the treatment forest does not see it either: the trajectory beta_S
+        # carries the whole exposure profile, and letting nu split on S gives
+        # the product beta_S * nu(x, S) an exposure-shape ridge that only the
+        # priors resolve. `split_exposure_trt` opens it for panels whose
+        # units need genuinely different shapes over exposure.
         blocks.append(
             integer_grid_block(
-                "s", "s", self.S_max_ + 1, mu_visible=False, nu_visible=False,
+                "s", "s", self.S_max_ + 1, mu_visible=False,
+                nu_visible=cfg.split_exposure_trt,
             )
         )
         if "ps" in raw:

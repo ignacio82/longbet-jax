@@ -30,9 +30,12 @@ $$
   with a squared-exponential (default), Matérn-3/2, Matérn-5/2 or AR(1) kernel
   $K$ of marginal variance $\sigma_k^2$ and lengthscale $\lambda$, and a constant
   mean marginalized into the kernel so projections beyond the fitted horizon
-  revert to the estimated common level. The treatment forest never splits on
-  $S$: the trajectory carries the whole exposure profile, which keeps the product
-  $\beta_S\nu$ identified.
+  revert to the estimated common level. By default the treatment forest does
+  not split on $S$: the trajectory carries the whole exposure profile, which
+  keeps the product $\beta_S\nu$ identified. `split_exposure_trt = TRUE` lets
+  it split on $S$ as well, for panels whose units need genuinely different
+  shapes over exposure; read the diagnostics, because that freedom is a ridge
+  between the trajectory and the forest.
 - $\gamma_i \sim \mathcal{N}(0, \sigma_\gamma^2)$ is a unit random intercept,
   $\sigma^2 \sim \mathrm{IG}(2, 1)$ on the standardized scale and
   $\sigma_\gamma^2 \sim \mathrm{IG}(1, 0.1)$.

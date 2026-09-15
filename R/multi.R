@@ -60,6 +60,8 @@
 #' @param split_time_ps Whether prognostic forest may split on calendar time.
 #' @param split_calendar_trt Whether treatment forests may split on calendar time
 #'   (see [longbet()]).
+#' @param split_exposure_trt Whether treatment forests may also split on the
+#'   exposure clock (see [longbet()]).
 #' @param random_intercept Whether to fit unit random intercepts.
 #' @param gamma_prior_a,gamma_prior_b Inverse-gamma prior on unit-intercept variance.
 #' @param sigma_prior_a,sigma_prior_b Inverse-gamma prior on innovation variance,
@@ -114,6 +116,7 @@ longbet_multi <- function(y, x, z, t = NULL,
                           sig_knl = 1.0, lambda_knl = 1.0, kernel_type = "se",
                           sigma_m = 1.0, gp_constant_mean = TRUE,
                           split_time_ps = TRUE, split_calendar_trt = TRUE,
+                          split_exposure_trt = FALSE,
                           random_intercept = TRUE,
                           gamma_prior_a = 1.0, gamma_prior_b = 0.1,
                           sigma_prior_a = 2.0, sigma_prior_b = 1.0,
@@ -301,6 +304,7 @@ longbet_multi <- function(y, x, z, t = NULL,
     gp_constant_mean = as.logical(gp_constant_mean),
     split_time_ps = as.logical(split_time_ps),
     split_calendar_trt = as.logical(split_calendar_trt),
+    split_exposure_trt = as.logical(split_exposure_trt),
     random_intercept = as.logical(random_intercept),
     gamma_prior_a = as.numeric(gamma_prior_a),
     gamma_prior_b = as.numeric(gamma_prior_b),

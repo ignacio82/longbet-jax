@@ -125,3 +125,39 @@ trees and a maximum depth of 8 (trees are stored as heaps of `2 ** depth` nodes,
 cap bounds archive size; on the onboarding panel at 60 trees, depth 6 and depth 10 mixed
 alike over two seeds, and depth 10 was slightly more accurate, 0.29 against 0.32 held-out
 RMSE, so the cap stays above the depths posterior trees use).
+
+## Addendum (2026-09-15): the book's 3,000-seller panel, and a pair-collapsed CHANGE that did not earn its cost
+
+On the book's rollout panel (3,000 sellers x 18 weeks, 54,000 cells, effects 0.05-0.2 on
+noise 0.28 with vertical-specific seasonal curves) four chains started from the prior
+agree within a chain and disagree across chains: the observed-panel ATT decorrelates in
+about four draws inside a chain, yet chain means sit about one posterior SD apart
+(R-hat 1.2-1.7, pooled bulk ESS about 10). Per-chain likelihoods are equal to within a
+within-chain SD, the treated-cell residual means are within 0.001 of zero in every
+chain, unit intercepts and variances mix, and re-optimizing every leaf jointly for each
+chain's fixed tree structures leaves the chain ATTs apart: the chains hold different,
+equally good partitions of the calendar structure, and the ATT differs across them.
+
+Decoding the forests shows the prognostic forest's calendar cutpoints frozen in
+chain-specific configurations. Moving one such cut by one bin costs 5-109 nats under
+backfitting (other leaves fixed). With the leaves of one well-chosen partner tree
+re-optimized alongside, the same moves cost 0-58 nats; with every prognostic leaf
+re-optimized, 0-31; with every leaf of both forests, the same again. So a CHANGE move
+that integrates out the leaves of the changed tree and a partner tree was implemented
+(exact: Gaussian pair marginal, joint conditional redraw of the pair's leaves; partner
+uniform, or uniform among trees splitting on the perturbed variable, which is symmetric
+because the set depends only on the other trees), validated by a dense-integral check,
+bookkeeping tests, the with/without tree-prior invariance test and the Geweke test.
+
+It did not resolve the disagreement. On a 1,000-seller slice (4 x (1,000 + 1,000)
+sweeps) the ATT R-hat was 1.19 without the move, 1.27 with a uniform partner and 1.23
+with a matched partner; on the full panel (4 x (2,000 + 2,000)) 1.22 without and 1.13
+with, with the segment ATTs still at 1.4-1.8. It costs 72% more per sweep (282 vs 164
+ms per chain-sweep on the slice). Most frozen cuts still cost 20 nats or more even when
+every leaf is re-optimized: the modes are separated by rearrangements of several cuts
+at once, which no single-tree proposal reaches. The move was removed. Also tried on
+this panel, without effect on the disagreement: 60, 100 and 200 trees; calendar splits
+off; minimum leaf sizes 50/200; a denser treatment-tree prior; chains four times
+longer (R-hat 1.13 after 8,000 sweeps on the slice). Exposure splits in the treatment
+forest (`split_exposure_trt`, off by default) halve the ATT error on this panel because
+its segments have different shapes over exposure, and are used by the chapters.

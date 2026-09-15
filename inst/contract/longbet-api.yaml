@@ -183,7 +183,13 @@ arguments:
     type: boolean
     default: true
     expose_in_r: true
-    description: Whether the treatment forest may split on calendar time; the exposure index is never split on, so FALSE gives the separable term beta_S * nu(x).
+    description: Whether the treatment forest may split on calendar time.
+  - python_name: split_exposure_trt
+    r_name: split_exposure_trt
+    type: boolean
+    default: false
+    expose_in_r: true
+    description: Whether the treatment forest may also split on the exposure clock; off by default so that beta_S carries the whole exposure profile and the product beta_S * nu stays identified.
   - python_name: tempering_levels
     r_name: tempering_levels
     type: integer
