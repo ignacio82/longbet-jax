@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import warnings
 from dataclasses import dataclass
 from numbers import Integral, Real
 from typing import Any, Literal
@@ -49,8 +50,9 @@ class LongBetConfig:
     -----------
     Every sweep updates both forests with GROW, PRUNE, CHANGE and one
     data-driven REGROW proposal per forest, then the exposure trajectory, the
-    unit intercepts, the variances, and a Metropolis move along the exact scale
-    ridge between ``beta`` and the treatment leaves. Parallel tempering
+    unit intercepts, the variances, a Metropolis move along the exact scale
+    ridge between ``beta`` and the treatment leaves, and an inter-ensemble
+    residual-transfer move between ``mu`` and ``nu``. Parallel tempering
     (``tempering_levels``) is available for posteriors whose forest modes the
     local moves connect too slowly. Chains start overdispersed from the prior
     so that R-hat measures convergence rather than seed agreement.
@@ -91,6 +93,12 @@ class LongBetConfig:
         levels keeps the exchange rate near a third. See ``longbet._tempering``.
     tempering_beta_min
         Inverse temperature of the hottest replica, in ``(0, 1]``.
+    use_inter_ensemble_move
+        Whether to run the inter-ensemble residual-transfer Metropolis-Hastings
+        step between ``mu`` and ``nu`` each sweep.
+    inter_ensemble_sd
+        Proposal standard deviation for the level and slope shifts in the
+        inter-ensemble transfer step.
     num_trees_pr, num_trees_trt
         Trees in the prognostic and treatment forests. The treatment forest
         needs more trees than a prognostic one of the same size: with 20 trees
@@ -116,7 +124,7 @@ class LongBetConfig:
         Prior standard deviation of the trajectory's constant mean, and whether
         that marginalized mean is included, so projections beyond the fitted
         horizon revert to an estimated common level rather than to zero.
-    split_time_ps
+    split_calendar_mu
         Whether the prognostic forest may split on calendar time.
     split_calendar_trt
         Whether the treatment forest may split on calendar time.
@@ -165,6 +173,8 @@ class LongBetConfig:
     inner_loop_length: int | None = None
     tempering_levels: int = 1
     tempering_beta_min: float = 0.05
+    use_inter_ensemble_move: bool = True
+    inter_ensemble_sd: float = 0.05
 
     # --- forests -----------------------------------------------------------
     num_trees_pr: int = 20
@@ -187,7 +197,7 @@ class LongBetConfig:
     gp_constant_mean: bool = True
 
     # --- structure ---------------------------------------------------------
-    split_time_ps: bool = True
+    split_calendar_mu: bool = True
     split_calendar_trt: bool = True
     split_exposure_trt: bool = False
 
@@ -240,6 +250,10 @@ class LongBetConfig:
         if not (isinstance(self.tempering_beta_min, Real) and not isinstance(self.tempering_beta_min, bool)
                 and 0 < self.tempering_beta_min <= 1):
             raise ValueError("tempering_beta_min must be in (0, 1]")
+        if (isinstance(self.inter_ensemble_sd, bool) or not isinstance(self.inter_ensemble_sd, Real)
+                or not math.isfinite(self.inter_ensemble_sd) or self.inter_ensemble_sd <= 0):
+            raise ValueError("inter_ensemble_sd must be a finite positive scalar")
+        object.__setattr__(self, "inter_ensemble_sd", float(self.inter_ensemble_sd))
         for name in ("num_trees_pr", "num_trees_trt", "min_points_per_leaf_pr",
                      "min_points_per_leaf_trt", "max_depth_pr", "max_depth_trt", "num_cutpoints"):
             if getattr(self, name) < 1:
@@ -258,8 +272,9 @@ class LongBetConfig:
             value = getattr(self, name)
             if not (isinstance(value, Real) and math.isfinite(value) and value >= 0):
                 raise ValueError(f"{name} must be a finite nonnegative scalar, got {value!r}")
-        for name in ("split_time_ps", "split_calendar_trt", "split_exposure_trt", "random_intercept", "gp_constant_mean",
-                     "sample_beta", "standardize", "sur"):
+        for name in ("split_calendar_mu", "split_calendar_trt", "split_exposure_trt",
+                     "random_intercept", "gp_constant_mean", "sample_beta",
+                     "standardize", "sur", "use_inter_ensemble_move"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean")
         for name in ("gamma_prior_a", "gamma_prior_b", "sigma_prior_a", "sigma_prior_b"):
@@ -302,6 +317,17 @@ class LongBetConfig:
             )
 
     @property
+    def split_time_ps(self) -> bool:
+        """Deprecated alias for :attr:`split_calendar_mu`."""
+        warnings.warn(
+            "'split_time_ps' is deprecated and will be removed in a future release; "
+            "use 'split_calendar_mu' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.split_calendar_mu
+
+    @property
     def sur_active(self) -> bool:
         """Whether SUR coupling is active (sur is True and sur_prior_var > 0)."""
         return bool(self.sur and self.sur_prior_var > 0.0)
@@ -312,10 +338,35 @@ class LongBetConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert configuration to a plain dictionary."""
-        return dataclasses.asdict(self)
+        d = dataclasses.asdict(self)
+        d["split_time_ps"] = self.split_calendar_mu
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> LongBetConfig:
         """Construct a configuration from a dictionary, ignoring unknown keys."""
+        d = dict(d)
+        if "split_time_ps" in d and "split_calendar_mu" not in d:
+            d["split_calendar_mu"] = d.pop("split_time_ps")
         field_names = {f.name for f in dataclasses.fields(cls)}
         return cls(**{k: v for k, v in d.items() if k in field_names})
+
+
+_orig_longbet_config_init = LongBetConfig.__init__
+
+
+def _longbet_config_init(self: LongBetConfig, *args: Any, **kwargs: Any) -> None:
+    if "split_time_ps" in kwargs:
+        warnings.warn(
+            "'split_time_ps' is deprecated and will be removed in a future release; "
+            "use 'split_calendar_mu' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        val = kwargs.pop("split_time_ps")
+        if "split_calendar_mu" not in kwargs:
+            kwargs["split_calendar_mu"] = val
+    _orig_longbet_config_init(self, *args, **kwargs)
+
+
+LongBetConfig.__init__ = _longbet_config_init  # type: ignore[method-assign]

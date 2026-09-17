@@ -21,7 +21,7 @@ from scipy import integrate, stats
 
 from longbet import LongBetConfig
 from longbet._ordinal import (category_probabilities, prepare_ordinal,
-    sample_cutpoints, sample_cutpoints_marginalized, sample_ordinal_latents,
+    sample_cutpoints_marginalized, sample_ordinal_latents,
     sample_truncated_normal)
 
 
@@ -127,26 +127,13 @@ def test_invalid_intervals_fail(lower, upper):
         jax.jit(sample_truncated_normal)(jax.random.key(1), lower, upper).block_until_ready()
 
 
-@pytest.mark.parametrize("top_empty", [False, True])
-def test_cutpoint_conditional_is_normal_prior(top_empty):
-    z = jnp.array([-1., .2, 1., 4.])
-    labels = jnp.array([0, 1, 1, 2])
-    mask = jnp.array([True, True, True, not top_empty])
-    keys = jax.random.split(jax.random.key(904), 20000)
-    draws = np.asarray(jax.jit(jax.vmap(lambda k: sample_cutpoints(
-        k, z, labels, jnp.array([2.]), mask, 1.5)))(keys))[:, 0]
-    hi = np.inf if top_empty else 4.
-    u = stats.truncnorm.cdf(draws, 1/1.5, hi/1.5, scale=1.5)
-    assert stats.kstest(u, "uniform").statistic < .022
-    assert (draws > 1).all() and (draws < hi).all()
-
-
-def test_empty_adjacent_categories_use_current_neighbor():
+def test_empty_adjacent_categories_recover_ordered_prior():
     @jax.jit
     def run(key):
         def step(cp, k):
-            cp = sample_cutpoints(k, jnp.array([-.5]), jnp.array([0]), cp,
-                                  jnp.array([True]), 2.)
+            cp = sample_cutpoints_marginalized(
+                k, cp, jnp.array([0]), jnp.array([-.5]), 1.0, jnp.array([True]), 2.0
+            )
             return cp, cp
         return jax.lax.scan(step, jnp.array([.2, .5, .9]), jax.random.split(key, 15000))[1]
     draws = np.asarray(run(jax.random.key(921)))[1000:]

@@ -50,9 +50,10 @@ from longbet._change_internal_move import change_internal_step
 from longbet._change_move import change_step
 from longbet._regrow_move import regrow_step
 from longbet._gp import sample_beta_gp
-from longbet._ordinal import sample_cutpoints, sample_cutpoints_marginalized, sample_ordinal_latents
+from longbet._ordinal import sample_cutpoints_marginalized, sample_ordinal_latents
 from longbet._forest_cache import refresh_prec_tree, current_forest_fit
 from longbet._x64 import enable_x64
+from longbet._inter_ensemble_move import inter_ensemble_transfer_step
 from longbet._ridge import ridge_scale_step
 from longbet._scales import compute_treatment_scale_attrs
 from longbet._state import LongBetState, chain_filter_spec
@@ -403,7 +404,53 @@ def longbet_single_step(
         )
 
     # ------------------------------------------------------------------
-    # 7. Error variance sigma^2
+    # 7. Metropolis move along the beta-nu scale ridge
+    # ------------------------------------------------------------------
+    if state.sample_beta:
+        beta_new, forest_nu, nu_fit = ridge_scale_step(
+            random.fold_in(key, 888),
+            beta_new,
+            forest_nu,
+            nu_fit,
+            state.K_chol,
+            state.leaf_prior_cov_inv_nu,
+            proposal_sigma=RIDGE_PROPOSAL_SIGMA,
+        )
+
+    # ------------------------------------------------------------------
+    # 8. Inter-ensemble residual-transfer Metropolis move (mu <-> nu)
+    # ------------------------------------------------------------------
+    if state.use_inter_ensemble_move:
+        w_transfer = b_z * beta_new[state.exposure_idx]
+        temp = (
+            jnp.float32(1.0)
+            if state.temperature is None
+            else jnp.asarray(state.temperature, dtype=jnp.float32)
+        )
+        view_mu_forest, mu_fit, forest_nu, nu_fit, R = inter_ensemble_transfer_step(
+            random.fold_in(key, 889),
+            view_mu.forest,
+            mu_fit,
+            forest_nu,
+            nu_fit,
+            R,
+            alpha_new,
+            w_transfer,
+            obs_mask,
+            state.z_vec,
+            state.time_idx,
+            state.T_periods,
+            sigma2,
+            view_mu.forest.leaf_prior_cov_inv,
+            state.leaf_prior_cov_inv_nu,
+            conditional_precision=conditional_precision,
+            temperature=temp,
+            proposal_sigma=state.inter_ensemble_sd,
+        )
+        view_mu = eqx.tree_at(lambda v: v.forest, view_mu, view_mu_forest)
+
+    # ------------------------------------------------------------------
+    # 9. Error variance sigma^2
     # ------------------------------------------------------------------
     if conditional_precision is not None:
         sigma2_new = sigma2
@@ -415,20 +462,6 @@ def longbet_single_step(
             keys[9],
             state.sigma_prior_a + m_obs / 2.0,
             state.sigma_prior_b + 0.5 * jnp.sum(jnp.square(jnp.where(obs_mask, R, 0.0))),
-        )
-
-    # ------------------------------------------------------------------
-    # 8. Metropolis move along the beta-nu scale ridge
-    # ------------------------------------------------------------------
-    if state.sample_beta:
-        beta_new, forest_nu, nu_fit = ridge_scale_step(
-            random.fold_in(key, 888),
-            beta_new,
-            forest_nu,
-            nu_fit,
-            state.K_chol,
-            state.leaf_prior_cov_inv_nu,
-            proposal_sigma=RIDGE_PROPOSAL_SIGMA,
         )
 
     # ------------------------------------------------------------------

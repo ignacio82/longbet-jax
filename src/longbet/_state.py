@@ -140,6 +140,8 @@ class LongBetState(State):
     temperature: Any = field(chains=CHAIN_AXIS, default=None)
     tempering_levels: int = field(static=True, default=1)
     tempering_beta_min: float = field(static=True, default=0.05)
+    use_inter_ensemble_move: bool = field(static=True, default=True)
+    inter_ensemble_sd: float = field(static=True, default=0.05)
 
     @property
     def is_tempered(self) -> bool:
@@ -580,6 +582,8 @@ def init_longbet(
         temperature=jnp.array(1.0, dtype=jnp.float32),
         tempering_levels=int(config.tempering_levels),
         tempering_beta_min=float(config.tempering_beta_min),
+        use_inter_ensemble_move=bool(config.use_inter_ensemble_move),
+        inter_ensemble_sd=float(config.inter_ensemble_sd),
         gamma_prior_a=config.gamma_prior_a,
         gamma_prior_b=config.gamma_prior_b,
         sigma_prior_a=config.sigma_prior_a,

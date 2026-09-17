@@ -167,26 +167,6 @@ def sample_ordinal_latents(key, labels, mean, sd, cutpoints, obs_mask, old_z):
     return jnp.where(obs_mask, latent, 0.0)
 
 
-def sample_cutpoints(key, z, labels, cutpoints, obs_mask, prior_scale):
-    """Sequential Gibbs for ordered half-normal cutpoints, with current neighbors."""
-    if cutpoints.shape[0] == 0:
-        return cutpoints
-    K = cutpoints.shape[0] + 2
-    codes = jnp.where(obs_mask, labels, 0).astype(jnp.int32)
-    minima = jnp.full(K, jnp.inf).at[codes].min(jnp.where(obs_mask, z, jnp.inf))
-    maxima = jnp.full(K, -jnp.inf).at[codes].max(jnp.where(obs_mask, z, -jnp.inf))
-    scale = jnp.asarray(prior_scale, jnp.float32)
-
-    def update(i, full):
-        j = i + 2
-        lower = jnp.maximum(full[j - 1], maxima[j - 1])
-        upper = jnp.minimum(full[j + 1], minima[j])
-        draw = sample_truncated_normal(random.fold_in(key, i), lower / scale, upper / scale)
-        return full.at[j].set(_interior(scale * draw, lower, upper))
-
-    return lax.fori_loop(0, K - 2, update, full_cutpoints(cutpoints))[2:-1]
-
-
 def _log_cutpoint_target(u, labels, mean, sd, obs_mask, prior_scale):
     gaps = jnp.exp(u)
     cutpoints = jnp.cumsum(gaps)

@@ -232,6 +232,7 @@ class LongBetPrediction:
         prob_mu0_summary: PosteriorSummary | None = None,
         prob_tau_summary: PosteriorSummary | None = None,
         att_prob_full: np.ndarray | None = None,
+        untreated_counts_per_t: np.ndarray | None = None,
     ) -> None:
         self.tauhats = tauhats
         self.muhats0 = muhats0
@@ -248,6 +249,11 @@ class LongBetPrediction:
         self.att_counts = att_counts
         self.summary_only = summary_only
         self.num_categories = num_categories
+        self.untreated_counts_per_t = (
+            np.asarray(untreated_counts_per_t, dtype=np.int64)
+            if untreated_counts_per_t is not None
+            else np.sum(np.asarray(z) == 0, axis=0)
+        )
         self.categories = None if num_categories is None else np.arange(num_categories)
         self.cutpoints_samples = cutpoints_samples
         self.prob_y, self.prob_mu0, self.prob_tau = prob_y, prob_mu0, prob_tau
@@ -255,6 +261,16 @@ class LongBetPrediction:
         self.prob_mu0_summary = prob_mu0_summary
         self.prob_tau_summary = prob_tau_summary
         self.att_prob_full = att_prob_full
+
+    @property
+    def beta_draws_by_exposure(self) -> np.ndarray:
+        """Exposure-trajectory draws in exposure-major layout, shape ``(S_total, draws)``."""
+        return np.asarray(self.beta_values).T
+
+    @property
+    def beta_draws_exposure_major(self) -> np.ndarray:
+        """Alias for :attr:`beta_draws_by_exposure`, shape ``(S_total, draws)``."""
+        return np.asarray(self.beta_values).T
 
     def _require_ordinal(self) -> None:
         if self.outcome != "ordinal":
@@ -319,7 +335,8 @@ class LongBetPrediction:
         """Average treatment effect on the treated, by exposure time.
 
         Works with or without full draws, because ``att_full`` is always
-        retained.
+        retained. Includes per-exposure concurrent control support metrics:
+        ``mean_concurrent_controls`` and ``pct_zero_control_cells``.
         """
         att_full = self.att_full
         q_low, q_high = 100.0 * (alpha / 2.0), 100.0 * (1.0 - alpha / 2.0)
@@ -327,11 +344,30 @@ class LongBetPrediction:
             warnings.simplefilter("ignore", RuntimeWarning)
             att_mean = np.nanmean(att_full, axis=1)
             intervals = np.nanpercentile(att_full, [q_low, q_high], axis=1)
+
+        n0_per_t = (
+            self.untreated_counts_per_t
+            if self.untreated_counts_per_t is not None
+            else np.sum(self.z == 0, axis=0)
+        )
+        n0_grid = np.broadcast_to(n0_per_t[None, :], self.z.shape)
+        mean_concurrent = np.full(att_full.shape[0], np.nan, dtype=np.float64)
+        pct_zero = np.full(att_full.shape[0], np.nan, dtype=np.float64)
+        for idx_s in range(att_full.shape[0]):
+            s_val = idx_s + 1
+            mask_s = (self.z == 1) & (self.s == s_val)
+            if np.any(mask_s):
+                n0_cells = n0_grid[mask_s]
+                mean_concurrent[idx_s] = float(np.mean(n0_cells))
+                pct_zero[idx_s] = float(np.mean(n0_cells == 0))
+
         return {
             "att": att_mean,
             "intervals": intervals,
             "att_full": att_full,
             "exposure": np.arange(1, att_full.shape[0] + 1),
+            "mean_concurrent_controls": mean_concurrent,
+            "pct_zero_control_cells": pct_zero,
         }
 
     def catt(self, alpha: float = 0.05) -> dict[str, Any]:
@@ -390,6 +426,16 @@ class LongBet:
     """
 
     def __init__(self, config: LongBetConfig | None = None, **kwargs: Any) -> None:
+        if "split_time_ps" in kwargs:
+            warnings.warn(
+                "'split_time_ps' is deprecated and will be removed in a future release; "
+                "use 'split_calendar_mu' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            val = kwargs.pop("split_time_ps")
+            if "split_calendar_mu" not in kwargs:
+                kwargs["split_calendar_mu"] = val
         if config is None:
             self.config = LongBetConfig(**kwargs)
         else:
@@ -412,6 +458,7 @@ class LongBet:
         self.T_: int = 0
         self.S_max_: int = 0
         self.t_fit_: np.ndarray | None = None
+        self.untreated_counts_per_t_: np.ndarray | None = None
         self.multi_origin: dict[str, Any] | None = None
 
     # -- fitting -----------------------------------------------------------
@@ -523,6 +570,25 @@ class LongBet:
 
         S_mat = derive_exposure(z_np, t_vec)
         self.S_max_ = int(S_mat.max())
+
+        obs_mat = np.isfinite(y_mat)
+        self.untreated_counts_per_t_ = np.sum((z_np == 0) & obs_mat, axis=0)
+        treated_periods = np.where(np.any((z_np == 1) & obs_mat, axis=0))[0]
+        if treated_periods.size > 0:
+            first_treated_t = int(treated_periods[0])
+            zero_control_periods = (
+                np.where(self.untreated_counts_per_t_[first_treated_t:] == 0)[0]
+                + first_treated_t
+            )
+            if len(zero_control_periods) > 0:
+                first_zero_t = int(zero_control_periods[0])
+                warnings.warn(
+                    f"Calendar period(s) t >= {first_zero_t} contain zero untreated control observations "
+                    f"(N_0,t = 0 for {len(zero_control_periods)} period(s)). Baseline counterfactuals mu(X_i, t) "
+                    "in these periods rely on tree leaf extrapolation from earlier periods.",
+                    UserWarning,
+                    stacklevel=3,
+                )
 
         unit_idx = np.repeat(np.arange(N, dtype=np.int32), T)
         time_idx = np.tile(np.arange(T, dtype=np.int32), N)
@@ -728,11 +794,11 @@ class LongBet:
                 )
             )
 
-        # Calendar time: split_time_ps governs the prognostic forest and
+        # Calendar time: split_calendar_mu governs the prognostic forest and
         # split_calendar_trt the treatment forest.
         blocks.append(
             integer_grid_block(
-                "t", "t", self.T_, mu_visible=cfg.split_time_ps,
+                "t", "t", self.T_, mu_visible=cfg.split_calendar_mu,
                 nu_visible=cfg.split_calendar_trt,
             )
         )
@@ -1097,6 +1163,12 @@ class LongBet:
                 ordinal_fields[name + "_summary"] = PosteriorSummary(
                     *(v.reshape(N, T, K) for v in acc.result()))
 
+        n0_pred = (
+            self.untreated_counts_per_t_
+            if (self.untreated_counts_per_t_ is not None and len(self.untreated_counts_per_t_) == T)
+            else np.sum(z_np == 0, axis=0)
+        )
+
         return LongBetPrediction(
             tauhats=tau_out.T.reshape(N, T, D) if keep else None,
             muhats0=mu0_out.T.reshape(N, T, D) if keep else None,
@@ -1112,12 +1184,31 @@ class LongBet:
             num_chains=self.config.num_chains,
             att_counts=att_counts,
             summary_only=summary_only,
+            untreated_counts_per_t=n0_pred,
             **ordinal_fields,
         )
 
     @property
     def _chained(self) -> bool:
         return self.config.num_chains > 1
+
+    @property
+    def beta_draws_(self) -> np.ndarray:
+        """Flattened posterior draws of the exposure trajectory ``beta``, shape ``(draws, S_max + 1)``."""
+        if self.trace is None:
+            raise RuntimeError("call fit() before accessing beta_draws_")
+        arr = np.asarray(self.trace.beta)
+        return arr.reshape(-1, *arr.shape[2:]) if arr.ndim > 1 and self._chained else arr
+
+    @property
+    def beta_draws_by_exposure(self) -> np.ndarray:
+        """Posterior draws of the exposure trajectory in exposure-major order, shape ``(S_max + 1, draws)``."""
+        return self.beta_draws_.T
+
+    @property
+    def beta_draws_exposure_major(self) -> np.ndarray:
+        """Alias for :attr:`beta_draws_by_exposure`, shape ``(S_max + 1, draws)``."""
+        return self.beta_draws_.T
 
     # -- convenience --------------------------------------------------------
 

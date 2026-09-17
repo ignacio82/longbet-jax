@@ -172,7 +172,7 @@ arguments:
     description: Whether the GP reverts to an estimated common level.
 
   # -- structure -------------------------------------------------------------
-  - python_name: split_time_ps
+  - python_name: split_calendar_mu
     r_name: split_time_ps
     type: boolean
     default: true
@@ -202,6 +202,18 @@ arguments:
     default: 0.05
     expose_in_r: true
     description: Inverse temperature of the hottest replica.
+  - python_name: use_inter_ensemble_move
+    r_name: use_inter_ensemble_move
+    type: boolean
+    default: true
+    expose_in_r: false
+    description: Whether to run the inter-ensemble residual-transfer Metropolis-Hastings step between mu and nu each sweep.
+  - python_name: inter_ensemble_sd
+    r_name: inter_ensemble_sd
+    type: float
+    default: 0.05
+    expose_in_r: false
+    description: Proposal standard deviation for the level and slope shifts in the inter-ensemble transfer step.
 
   # -- priors ----------------------------------------------------------------
   - python_name: random_intercept
@@ -315,8 +327,11 @@ r_only_arguments:
 return_fields:
   fit:
     - name: beta_values
+      shape: "(S_max + 1, draws) in R; (draws, S_max + 1) in Python"
+      description: Exposure trajectory draws (use beta_draws_by_exposure in Python for exposure-major (S_max + 1, draws) layout).
+    - name: beta_draws_by_exposure
       shape: "(S_max + 1, draws)"
-      description: Exposure trajectory draws.
+      description: Exposure trajectory draws in exposure-major layout (Python property on LongBet and LongBetPrediction).
     - name: gamma_draws
       shape: "(N, draws)"
       description: Unit random intercept draws.
@@ -336,13 +351,13 @@ return_fields:
       description: Mean used to centre the outcome.
     - name: b0_draws
       shape: "(draws,)"
-      description: Adaptive coding weight for control cells.
+      description: Fixed constant 0.0 (untreated treatment indicator coding; retained for archive layout compatibility).
     - name: b1_draws
       shape: "(draws,)"
-      description: Adaptive coding weight for treated cells.
+      description: Fixed constant 1.0 (treated indicator coding; retained for archive layout compatibility).
     - name: alpha_draws
       shape: "(draws,)"
-      description: Prognostic scale draws.
+      description: Fixed constant 1.0 (prognostic forest scaling factor; retained for archive layout compatibility).
     - name: random_intercept
       shape: "()"
       description: Whether unit random intercepts were fitted.
