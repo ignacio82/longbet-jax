@@ -53,7 +53,10 @@ from longbet._gp import sample_beta_gp
 from longbet._ordinal import sample_cutpoints_marginalized, sample_ordinal_latents
 from longbet._forest_cache import refresh_prec_tree, current_forest_fit
 from longbet._x64 import enable_x64
-from longbet._inter_ensemble_move import inter_ensemble_transfer_step
+from longbet._inter_ensemble_move import (
+    inter_ensemble_beta_gamma_step,
+    inter_ensemble_transfer_step,
+)
 from longbet._ridge import ridge_scale_step
 from longbet._scales import compute_treatment_scale_attrs
 from longbet._state import LongBetState, chain_filter_spec
@@ -418,15 +421,46 @@ def longbet_single_step(
         )
 
     # ------------------------------------------------------------------
-    # 8. Inter-ensemble residual-transfer Metropolis move (mu <-> nu)
+    # 8. Inter-ensemble residual-transfer Metropolis move (mu <-> gamma, beta, nu)
     # ------------------------------------------------------------------
     if state.use_inter_ensemble_move:
-        w_transfer = b_z * beta_new[state.exposure_idx]
         temp = (
             jnp.float32(1.0)
             if state.temperature is None
             else jnp.asarray(state.temperature, dtype=jnp.float32)
         )
+        view_mu_forest, mu_fit, gamma_new, beta_new, R = inter_ensemble_beta_gamma_step(
+            random.fold_in(key, 887),
+            view_mu.forest,
+            mu_fit,
+            gamma_new,
+            beta_new,
+            R,
+            alpha_new,
+            nu_fit,
+            b_z,
+            obs_mask,
+            state.z_vec,
+            state.time_idx,
+            state.T_periods,
+            state.unit_idx,
+            state.N_units,
+            state.exposure_idx,
+            state.S_max,
+            sigma2,
+            view_mu.forest.leaf_prior_cov_inv,
+            sigma_gamma2_new,
+            state.K_chol,
+            state.random_intercept,
+            state.sample_beta,
+            conditional_precision=conditional_precision,
+            temperature=temp,
+            X_unified=state.X,
+            y_vec=state.y,
+        )
+        view_mu = eqx.tree_at(lambda v: v.forest, view_mu, view_mu_forest)
+
+        w_transfer = b_z * beta_new[state.exposure_idx]
         view_mu_forest, mu_fit, forest_nu, nu_fit, R = inter_ensemble_transfer_step(
             random.fold_in(key, 889),
             view_mu.forest,
@@ -449,6 +483,7 @@ def longbet_single_step(
             unit_idx=state.unit_idx,
             N_units=state.N_units,
             X_unified=state.X,
+            y_vec=state.y,
         )
         view_mu = eqx.tree_at(lambda v: v.forest, view_mu, view_mu_forest)
 

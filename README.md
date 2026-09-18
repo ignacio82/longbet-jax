@@ -51,12 +51,19 @@ ATT by exposure averages it over the treated cells at that exposure. Missing
 cells (`NaN`) are marginalized, not imputed. Every sweep updates both forests
 with GROW, PRUNE, CHANGE (a new rule at a leaf parent, or at any internal
 node with its subtree kept) and one data-driven REGROW proposal, then $\beta$,
-$\gamma$ and the variances, plus a Metropolis move along the exact scale ridge
-between $\beta$ and the treatment leaves. Chains start from the prior, so
-$\hat R$ measures convergence; `tempering_levels = K` runs each chain as a
-parallel-tempering ladder for posteriors whose forest modes the local moves
-connect too slowly. Defaults: 4 chains, 2,000 burn-in and 1,000 retained
-sweeps, 20 prognostic and 60 treatment trees of depth at most 8.
+$\gamma$ and the variances, a Metropolis move along the exact scale ridge
+between $\beta$ and the treatment leaves, and a two-stage conjugate Gaussian
+subspace Gibbs move along the inter-ensemble trend ridge between $(\mu, \gamma)$
+and $(\beta, \nu)$ (`use_inter_ensemble_move = True`). Chains start from the
+prior, so $\hat R$ measures convergence; `tempering_levels = K` runs each chain
+as a parallel-tempering ladder for posteriors whose forest modes the local moves
+connect too slowly. In addition to bulk/tail ESS, rank $\hat R$ and MCSE per
+exposure, `pred.stability()` reports concurrent untreated control support per
+exposure (`mean_concurrent_controls`, `min_concurrent_controls`,
+`pct_zero_control_cells`) and `model.untreated_counts_per_t_` tracks untreated
+units per calendar period. Defaults: 4 chains, 2,000 burn-in and 1,000 retained
+sweeps (`n_skip = 1` thinning interval), 20 prognostic and 60 treatment trees of
+depth at most 8.
 
 ### Python
 
@@ -72,12 +79,12 @@ t = np.arange(1, T + 1)
 s = np.where(z == 1, np.maximum(t[None, :] - 4, 0), 0)
 y = 0.5 * x[:, [0]] + 0.1 * t + 0.8 * np.sqrt(s) + rng.normal(0, 0.3, (N, T))
 
-model = LongBet(LongBetConfig(num_chains=4, num_burnin=2000, num_sweeps=1000))
+model = LongBet(LongBetConfig(num_chains=4, num_burnin=2000, num_sweeps=1000, n_skip=1))
 model.fit(y=y, x=x, z=z, t=t)                          # outcome="binary" / "ordinal" for other likelihoods
 
 pred = model.predict(x=x, z=z, t=t, summary_only=True)  # any counterfactual schedule z may be passed
 att = get_att(pred)                                     # att, intervals, exposure
-diag = pred.stability()                                 # bulk/tail ESS, rank R-hat, MCSE per exposure
+diag = pred.stability()                                 # bulk/tail ESS, rank R-hat, MCSE, and control support per exposure
 print(att["exposure"], att["att"], diag.summary["ess_min"], diag.summary["rhat_max"])
 model.save("longbet.npz"); model = LongBet.load("longbet.npz")
 ```

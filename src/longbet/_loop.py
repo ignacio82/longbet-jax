@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import partial
 from typing import NamedTuple
 
 import equinox as eqx
@@ -153,6 +154,73 @@ def _set_param(
     return trace.at[ndindex].set(val, mode='drop')
 
 
+@partial(
+    jax.jit,
+    static_argnames=('n_burn_i', 'n_skip_i', 'tempered', 'levels', 'sample_axis'),
+)
+def _run_inner_batch(
+    c: _MCMCCarry,
+    i_target: Int32[Array, ''],
+    n_burn_i: int,
+    n_skip_i: int,
+    tempered: bool,
+    levels: int,
+    sample_axis: int,
+) -> _MCMCCarry:
+    noop_idx = jnp.iinfo(jnp.int32).max
+
+    def cond_fn(carry_in: _MCMCCarry) -> Bool[Array, '']:
+        return carry_in.i_total < i_target
+
+    def body_fn(carry_in: _MCMCCarry) -> _MCMCCarry:
+        key_step, key_next = random.split(carry_in.key)
+        key_swap = random.fold_in(key_step, 4242)  # keeps the untempered stream unchanged
+        i = carry_in.i_total
+        new_state = longbet_step(key_step, carry_in.state)
+        swap_accepts = carry_in.swap_accepts
+        if tempered:
+            new_state, accepted = swap_step(key_swap, new_state, i)
+            swap_accepts = swap_accepts + accepted.astype(jnp.float32)
+            cold_idx = jnp.arange(0, new_state.num_chains, levels)
+            cold_state = select_replicas(new_state, cold_idx)
+        else:
+            cold_state = new_state
+
+        is_burn = i < n_burn_i
+        burnin_idx = jnp.where(is_burn, i, noop_idx)
+
+        i_from_burn = i - n_burn_i
+        is_save = (~is_burn) & (((i_from_burn + 1) % n_skip_i) == 0)
+        main_idx = jnp.where(is_save, i_from_burn // n_skip_i, noop_idx)
+
+        v_mu, v_nu = _make_views(cold_state)
+
+        return _MCMCCarry(
+            state=new_state,
+            key=key_next,
+            i_total=i + 1,
+            mu_burnin=_set(carry_in.mu_burnin, burnin_idx, BurninTrace.from_state(v_mu)),
+            nu_burnin=_set(carry_in.nu_burnin, burnin_idx, BurninTrace.from_state(v_nu)),
+            mu_main=_set(carry_in.mu_main, main_idx, MainTrace.from_state(v_mu)),
+            nu_main=_set(carry_in.nu_main, main_idx, MainTrace.from_state(v_nu)),
+            beta_trace=_set_param(carry_in.beta_trace, main_idx, cold_state.beta, sample_axis),
+            gamma_trace=_set_param(carry_in.gamma_trace, main_idx, cold_state.gamma, sample_axis),
+            b0_trace=_set_param(carry_in.b0_trace, main_idx, cold_state.b0, sample_axis),
+            b1_trace=_set_param(carry_in.b1_trace, main_idx, cold_state.b1, sample_axis),
+            alpha_trace=_set_param(carry_in.alpha_trace, main_idx, cold_state.alpha, sample_axis),
+            sigma2_trace=_set_param(carry_in.sigma2_trace, main_idx, cold_state.sigma2, sample_axis),
+            sigma_gamma2_trace=_set_param(
+                carry_in.sigma_gamma2_trace, main_idx, cold_state.sigma_gamma2, sample_axis
+            ),
+            cutpoints_trace=(_set_param(carry_in.cutpoints_trace, main_idx,
+                                       cold_state.cutpoints, sample_axis)
+                             if carry_in.cutpoints_trace is not None else None),
+            swap_accepts=swap_accepts,
+        )
+
+    return lax.while_loop(cond_fn, body_fn, c)
+
+
 def run_longbet_mcmc(
     key: Key[Array, ''],
     state: LongBetState,
@@ -224,63 +292,12 @@ def run_longbet_mcmc(
 
     inner_length = n_iters if inner_loop_length is None else max(1, int(inner_loop_length))
     n_outer = max(1, -(-n_iters // inner_length))
-    noop_idx = jnp.iinfo(jnp.int32).max
-
-    def run_inner_batch(c: _MCMCCarry, i_target: Int32[Array, '']) -> _MCMCCarry:
-        def cond_fn(carry_in: _MCMCCarry) -> Bool[Array, '']:
-            return carry_in.i_total < i_target
-
-        def body_fn(carry_in: _MCMCCarry) -> _MCMCCarry:
-            key_step, key_next = random.split(carry_in.key)
-            key_swap = random.fold_in(key_step, 4242)  # keeps the untempered stream unchanged
-            i = carry_in.i_total
-            new_state = longbet_step(key_step, carry_in.state)
-            swap_accepts = carry_in.swap_accepts
-            if tempered:
-                new_state, accepted = swap_step(key_swap, new_state, i)
-                swap_accepts = swap_accepts + accepted.astype(jnp.float32)
-            cold_state = cold(new_state)
-
-            is_burn = i < n_burn_i
-            burnin_idx = jnp.where(is_burn, i, noop_idx)
-
-            i_from_burn = i - n_burn_i
-            is_save = (~is_burn) & (((i_from_burn + 1) % n_skip_i) == 0)
-            main_idx = jnp.where(is_save, i_from_burn // n_skip_i, noop_idx)
-
-            v_mu, v_nu = _make_views(cold_state)
-
-            return _MCMCCarry(
-                state=new_state,
-                key=key_next,
-                i_total=i + 1,
-                mu_burnin=_set(carry_in.mu_burnin, burnin_idx, BurninTrace.from_state(v_mu)),
-                nu_burnin=_set(carry_in.nu_burnin, burnin_idx, BurninTrace.from_state(v_nu)),
-                mu_main=_set(carry_in.mu_main, main_idx, MainTrace.from_state(v_mu)),
-                nu_main=_set(carry_in.nu_main, main_idx, MainTrace.from_state(v_nu)),
-                beta_trace=_set_param(carry_in.beta_trace, main_idx, cold_state.beta, sample_axis),
-                gamma_trace=_set_param(carry_in.gamma_trace, main_idx, cold_state.gamma, sample_axis),
-                b0_trace=_set_param(carry_in.b0_trace, main_idx, cold_state.b0, sample_axis),
-                b1_trace=_set_param(carry_in.b1_trace, main_idx, cold_state.b1, sample_axis),
-                alpha_trace=_set_param(carry_in.alpha_trace, main_idx, cold_state.alpha, sample_axis),
-                sigma2_trace=_set_param(carry_in.sigma2_trace, main_idx, cold_state.sigma2, sample_axis),
-                sigma_gamma2_trace=_set_param(
-                    carry_in.sigma_gamma2_trace, main_idx, cold_state.sigma_gamma2, sample_axis
-                ),
-                cutpoints_trace=(_set_param(carry_in.cutpoints_trace, main_idx,
-                                           cold_state.cutpoints, sample_axis)
-                                 if carry_in.cutpoints_trace is not None else None),
-                swap_accepts=swap_accepts,
-            )
-
-        return lax.while_loop(cond_fn, body_fn, c)
-
-    # i_target is traced, not static: a different batch bound must not recompile.
-    jitted_inner = jax.jit(run_inner_batch)
 
     for outer_step in range(n_outer):
         i_target = min((outer_step + 1) * inner_length, n_iters)
-        carry = jitted_inner(carry, jnp.int32(i_target))
+        carry = _run_inner_batch(
+            carry, jnp.int32(i_target), n_burn_i, n_skip_i, tempered, levels, sample_axis
+        )
         if callback is not None:
             callback(outer_step, n_outer, carry.state)
 
