@@ -446,6 +446,9 @@ def longbet_single_step(
             conditional_precision=conditional_precision,
             temperature=temp,
             proposal_sigma=state.inter_ensemble_sd,
+            unit_idx=state.unit_idx,
+            N_units=state.N_units,
+            X_unified=state.X,
         )
         view_mu = eqx.tree_at(lambda v: v.forest, view_mu, view_mu_forest)
 

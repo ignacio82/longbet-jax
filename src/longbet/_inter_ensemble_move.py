@@ -12,23 +12,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Inter-ensemble residual-transfer Metropolis-Hastings step for LongBet.
+"""Exact conjugate subspace Gibbs inter-ensemble residual-transfer step for LongBet.
 
 On staggered panels where treated and control cohorts follow diverging baseline
 trends, the prognostic ensemble ``mu(X_i, t)`` and treatment ensemble
-``beta_{S_it} * nu(X_i, t)`` can trade off post-adoption level and calendar-time
-slope on treated cells (Z_it = 1). Sequential Gibbs updates update one forest
-holding the other fixed, which can trap chains in local modes with elevated
-R-hat.
+``beta_{S_it} * nu(X_i, t)`` can trade off post-adoption level, calendar-time
+slope, and curvature on treated cells (Z_it = 1). Sequential Gibbs updates
+update one forest holding the other fixed, which can trap chains in local modes
+with elevated R-hat.
 
-This module implements a joint Metropolis-Hastings step that proposes a
-synchronized 2-parameter (level + normalized calendar-time slope) translation
-``delta_0 + delta_1 * t_norm`` added to the active leaves of ``mu`` and
-subtracted (scaled by ``1 / beta_S``) from the active leaves of ``nu`` on
-treated cells. Because the translation vector depends only on fixed tree
-topologies and the current GP draw ``beta``, the transformation has unit
-Jacobian determinant (``|J| = 1``) and leaves the target posterior distribution
-invariant.
+This module implements an exact conjugate subspace Gibbs step that parameterizes
+an orthogonal 4-dimensional transfer subspace delta in R^4 spanning:
+  - constant level (1)
+  - linear calendar time trend (t_norm)
+  - quadratic calendar time curvature (t_norm^2 - 1/12)
+  - treatment exposure profile (w_norm)
+weighted by each prognostic leaf's squared treated observation fraction (p_trt^2),
+so pure untreated control leaves remain untouched. Because both the Gaussian
+likelihood (or probit/ordinal latent Gaussian likelihood) and the leaf priors
+are quadratic in the leaf values, the conditional posterior distribution
+p(delta | Y, trees, beta, sigma^2) is an exact 4-dimensional Gaussian
+distribution. Drawing delta from this conditional has 100% acceptance
+probability, requires no step-size tuning, and leaves the target joint posterior
+distribution strictly invariant.
 """
 
 from __future__ import annotations
@@ -44,19 +50,19 @@ from bartz.mcmcstep._step import apply_moves_to_leaf_indices
 from longbet._ridge import compute_active_leaf_stats
 
 
-def _leaf_means(
+def _leaf_stats_vec(
     ids: Int32[Array, ' n'],
-    values: Float32[Array, ' n'],
+    Phi: Float32[Array, 'n K'],
     mask: Bool[Array, ' n'],
     max_slots: int,
-) -> tuple[Float32[Array, ' max_slots'], Float32[Array, ' max_slots']]:
-    """Compute per-slot mean of ``values`` and active observation count."""
-    v_masked = jnp.where(mask, values, 0.0).astype(jnp.float32)
-    m_masked = mask.astype(jnp.float32)
-    sum_v = jnp.zeros(max_slots, dtype=jnp.float32).at[ids].add(v_masked)
-    cnt = jnp.zeros(max_slots, dtype=jnp.float32).at[ids].add(m_masked)
-    mean_v = jnp.where(cnt > 0, sum_v / jnp.maximum(cnt, 1.0), 0.0)
-    return mean_v, cnt
+) -> tuple[Float32[Array, 'max_slots K'], Float32[Array, ' max_slots']]:
+    """Compute per-slot mean of ``Phi`` (shape ``(n, K)``) and active count."""
+    m_f32 = mask.astype(jnp.float32)
+    Phi_masked = jnp.where(mask[:, None], Phi, 0.0).astype(jnp.float32)
+    sum_Phi = jnp.zeros((max_slots, Phi.shape[1]), dtype=jnp.float32).at[ids].add(Phi_masked)
+    cnt = jnp.zeros(max_slots, dtype=jnp.float32).at[ids].add(m_f32)
+    mean_Phi = jnp.where(cnt[:, None] > 0, sum_Phi / jnp.maximum(cnt[:, None], 1.0), 0.0)
+    return mean_Phi, cnt
 
 
 def inter_ensemble_transfer_step(
@@ -79,58 +85,27 @@ def inter_ensemble_transfer_step(
     temperature: Float32[Array, ''] = jnp.float32(1.0),
     proposal_sigma: float = 0.05,
     min_abs_beta: float = 0.05,
+    unit_idx: Int32[Array, ' n'] | None = None,
+    N_units: int | None = None,
+    X_unified: Any = None,
 ) -> tuple[Any, Float32[Array, ' n'], Any, Float32[Array, ' n'], Float32[Array, ' n']]:
-    """Execute one joint level-and-slope transfer MH step between mu and nu leaves.
-
-    Parameters
-    ----------
-    key
-        PRNG key.
-    forest_mu, mu_fit
-        Current prognostic forest and its fit vector in data units.
-    forest_nu, nu_fit
-        Current treatment forest and its fit vector in data units.
-    R
-        Current full-model residual in data units, shape ``(n,)``.
-    alpha
-        Prognostic scaling factor (scalar).
-    w
-        Treatment multiplier ``b_z * beta_S`` per cell, shape ``(n,)``.
-    obs_mask
-        Boolean mask of observed cells, shape ``(n,)``.
-    z_vec
-        Treatment indicator vector (1.0 treated, 0.0 untreated), shape ``(n,)``.
-    time_idx
-        Integer calendar period index ``0 .. T_periods - 1``, shape ``(n,)``.
-    T_periods
-        Total number of calendar periods (static int).
-    sigma2
-        Current innovation variance (scalar).
-    leaf_prior_cov_inv_mu, leaf_prior_cov_inv_nu
-        Leaf prior precisions in data units for ``mu`` and ``nu``.
-    conditional_precision
-        Optional per-cell precision vector for SUR coupling.
-    temperature
-        Inverse temperature for parallel tempering (default 1.0).
-    proposal_sigma
-        Standard deviation of the normal proposal for ``(delta_0, delta_1)``.
-    min_abs_beta
-        Minimum average treatment multiplier ``|w|`` required in a ``nu`` leaf
-        for that leaf to participate in the compensating shift.
-
-    Returns
-    -------
-    forest_mu_new, mu_fit_new, forest_nu_new, nu_fit_new, R_new
-    """
-    k_prop, k_acc = jax.random.split(key)
-
-    deltas = (
-        jax.random.normal(k_prop, shape=(2,), dtype=jnp.float32) * proposal_sigma
-    )
-    delta_0, delta_1 = deltas[0], deltas[1]
-
+    """Execute one exact conjugate subspace Gibbs transfer step between mu and nu leaves."""
+    del proposal_sigma, unit_idx, N_units, X_unified
     denom_t = jnp.float32(max(1, T_periods - 1))
     t_norm = (time_idx.astype(jnp.float32) - 0.5 * denom_t) / denom_t
+    t_quad = jnp.square(t_norm) - jnp.float32(1.0 / 12.0)
+    w_norm = w / jnp.maximum(jnp.max(jnp.abs(w)), 1.0)
+
+    Phi = jnp.stack(
+        [
+            jnp.ones_like(t_norm),
+            t_norm,
+            t_quad,
+            w_norm,
+        ],
+        axis=-1,
+    )  # shape (n, K=4)
+    K = Phi.shape[1]
 
     ids_mu = apply_moves_to_leaf_indices(
         forest_mu.leaf_indices, forest_mu.to_prune, forest_mu.move_node
@@ -151,105 +126,104 @@ def inter_ensemble_transfer_step(
     m_mu = jnp.float32(forest_mu.leaf_tree.shape[0])
     m_nu = jnp.float32(forest_nu.leaf_tree.shape[0])
 
-    # 1. Proposed shift on prognostic forest mu (over all observed cells)
-    t_mean_mu, cnt_mu = jax.vmap(_leaf_means, in_axes=(0, None, None, None))(
-        ids_mu, t_norm, obs_mask, max_slots_mu
-    )
-    active_mu = is_leaf_mu & (cnt_mu > 0)
-    shift_mu_data = jnp.where(
-        active_mu, (delta_0 + delta_1 * t_mean_mu) / m_mu, 0.0
-    )
-    prop_leaf_tree_mu = (
-        forest_mu.leaf_tree + shift_mu_data / forest_mu.leaf_unit
-    )
-
-    # 2. Proposed compensating shift on treatment forest nu (over treated observed cells)
+    # 1. Compute leaf basis directions A_mu (data units), shape (m_mu, max_slots_mu, K)
     trt_obs_mask = obs_mask & (z_vec == 1.0)
-    t_mean_nu, cnt_nu = jax.vmap(_leaf_means, in_axes=(0, None, None, None))(
-        ids_nu, t_norm, trt_obs_mask, max_slots_nu
+    Phi_mean_mu, cnt_all_mu = jax.vmap(
+        _leaf_stats_vec, in_axes=(0, None, None, None)
+    )(ids_mu, Phi, obs_mask, max_slots_mu)
+    _, cnt_trt_mu = jax.vmap(
+        _leaf_stats_vec, in_axes=(0, None, None, None)
+    )(ids_mu, Phi[:, :1], trt_obs_mask, max_slots_mu)
+
+    p_trt_mu = jnp.where(
+        cnt_all_mu > 0, cnt_trt_mu / jnp.maximum(cnt_all_mu, 1.0), 0.0
     )
-    w_mean_nu, _ = jax.vmap(_leaf_means, in_axes=(0, None, None, None))(
-        ids_nu, w, trt_obs_mask, max_slots_nu
-    )
+    active_mu = is_leaf_mu & (cnt_trt_mu > 0)
+    weight_mu = jnp.where(active_mu, jnp.square(p_trt_mu) / m_mu, 0.0)
+    A_mu = weight_mu[:, :, None] * Phi_mean_mu  # (m_mu, max_slots_mu, K)
+
+    # Induced change J_mu in mu_fit per unit of delta: shape (n, K)
+    J_mu_per_tree = jax.vmap(lambda a_tree, idx: a_tree[idx])(A_mu, ids_mu)
+    J_mu = jnp.sum(J_mu_per_tree, axis=0)  # (n, K)
+
+    # 2. Compute compensating leaf basis directions A_nu (data units), shape (m_nu, max_slots_nu, K)
+    target_nu_cell = alpha * J_mu  # (n, K)
+    target_mean_nu, cnt_trt_nu = jax.vmap(
+        _leaf_stats_vec, in_axes=(0, None, None, None)
+    )(ids_nu, target_nu_cell, trt_obs_mask, max_slots_nu)
+    w_mean_nu, _ = jax.vmap(
+        _leaf_stats_vec, in_axes=(0, None, None, None)
+    )(ids_nu, w[:, None], trt_obs_mask, max_slots_nu)
+    w_mean_nu = w_mean_nu[:, :, 0]
+
     active_nu = (
         is_leaf_nu
-        & (cnt_nu > 0)
+        & (cnt_trt_nu > 0)
         & (jnp.abs(w_mean_nu) > min_abs_beta)
     )
-    safe_w = jnp.where(active_nu, w_mean_nu, 1.0)
-    shift_nu_data = jnp.where(
-        active_nu,
-        -alpha * (delta_0 + delta_1 * t_mean_nu) / (m_nu * safe_w),
+    safe_w_nu = jnp.where(active_nu, w_mean_nu, 1.0)
+    A_nu = jnp.where(
+        active_nu[:, :, None],
+        -target_mean_nu / (m_nu * safe_w_nu[:, :, None]),
         0.0,
-    )
-    prop_leaf_tree_nu = (
-        forest_nu.leaf_tree + shift_nu_data / forest_nu.leaf_unit
-    )
+    )  # (m_nu, max_slots_nu, K)
 
-    # 3. Evaluate proposed forest fits and full-model residual
-    vals_mu_prop = jax.vmap(lambda leaf, index: leaf[index])(
-        prop_leaf_tree_mu, ids_mu
-    )
-    mu_fit_prop = forest_mu.offset + forest_mu.leaf_unit * jnp.sum(
-        vals_mu_prop.astype(jnp.float32), axis=0
-    )
+    # Induced change J_nu in nu_fit per unit of delta: shape (n, K)
+    J_nu_per_tree = jax.vmap(lambda a_tree, idx: a_tree[idx])(A_nu, ids_nu)
+    J_nu = jnp.sum(J_nu_per_tree, axis=0)  # (n, K)
 
-    vals_nu_prop = jax.vmap(lambda leaf, index: leaf[index])(
-        prop_leaf_tree_nu, ids_nu
-    )
-    nu_fit_prop = forest_nu.offset + forest_nu.leaf_unit * jnp.sum(
-        vals_nu_prop.astype(jnp.float32), axis=0
-    )
-
-    R_prop = jnp.where(
-        obs_mask,
-        R - alpha * (mu_fit_prop - mu_fit) - w * (nu_fit_prop - nu_fit),
+    # Total residual sensitivity H = alpha * J_mu + w * J_nu: shape (n, K)
+    H = jnp.where(
+        obs_mask[:, None],
+        alpha * J_mu + w[:, None] * J_nu,
         0.0,
     )
 
-    # 4. Log-likelihood difference
-    sq_diff = jnp.where(obs_mask, jnp.square(R_prop) - jnp.square(R), 0.0)
+    # 3. Assemble exact Gaussian conditional precision (Sigma_inv) and linear term (h)
     if conditional_precision is None:
-        log_lik_diff = (-0.5 * jnp.sum(sq_diff) / sigma2) * temperature
+        cell_prec = jnp.where(obs_mask, temperature / sigma2, 0.0)
     else:
-        log_lik_diff = -0.5 * jnp.sum(sq_diff * conditional_precision)
+        cell_prec = jnp.where(obs_mask, conditional_precision, 0.0)
 
-    # 5. Log-prior difference across actual leaves
-    curr_mu_data = forest_mu.leaf_tree * forest_mu.leaf_unit
-    prop_mu_data = prop_leaf_tree_mu * forest_mu.leaf_unit
-    log_prior_diff_mu = -0.5 * leaf_prior_cov_inv_mu * jnp.sum(
-        jnp.where(
-            is_leaf_mu,
-            jnp.square(prop_mu_data) - jnp.square(curr_mu_data),
-            0.0,
-        )
-    )
+    H_weighted = H * cell_prec[:, None]
+    prec_lik = H.T @ H_weighted  # (K, K)
+    h_lik = H_weighted.T @ R  # (K,)
 
-    curr_nu_data = forest_nu.leaf_tree * forest_nu.leaf_unit
-    prop_nu_data = prop_leaf_tree_nu * forest_nu.leaf_unit
-    log_prior_diff_nu = -0.5 * leaf_prior_cov_inv_nu * jnp.sum(
-        jnp.where(
-            is_leaf_nu,
-            jnp.square(prop_nu_data) - jnp.square(curr_nu_data),
-            0.0,
-        )
-    )
+    # Prior contribution from mu leaves
+    curr_mu_data = forest_mu.leaf_tree * forest_mu.leaf_unit  # (m_mu, max_slots_mu)
+    A_mu_flat = jnp.where(is_leaf_mu[:, :, None], A_mu, 0.0).reshape(-1, K)
+    curr_mu_flat = jnp.where(is_leaf_mu, curr_mu_data, 0.0).reshape(-1)
+    prec_mu = leaf_prior_cov_inv_mu * (A_mu_flat.T @ A_mu_flat)
+    h_mu = -leaf_prior_cov_inv_mu * (A_mu_flat.T @ curr_mu_flat)
 
-    log_alpha = log_lik_diff + log_prior_diff_mu + log_prior_diff_nu
-    log_u = jnp.log(
-        jax.random.uniform(k_acc, shape=(), dtype=jnp.float32)
-        + jnp.finfo(jnp.float32).tiny
-    )
-    accept = log_u < log_alpha
+    # Prior contribution from nu leaves
+    curr_nu_data = forest_nu.leaf_tree * forest_nu.leaf_unit  # (m_nu, max_slots_nu)
+    A_nu_flat = jnp.where(is_leaf_nu[:, :, None], A_nu, 0.0).reshape(-1, K)
+    curr_nu_flat = jnp.where(is_leaf_nu, curr_nu_data, 0.0).reshape(-1)
+    prec_nu = leaf_prior_cov_inv_nu * (A_nu_flat.T @ A_nu_flat)
+    h_nu = -leaf_prior_cov_inv_nu * (A_nu_flat.T @ curr_nu_flat)
 
-    new_leaf_tree_mu = jnp.where(accept, prop_leaf_tree_mu, forest_mu.leaf_tree)
+    prec_total = prec_lik + prec_mu + prec_nu + jnp.eye(K, dtype=jnp.float32) * 1e-5
+    h_total = h_lik + h_mu + h_nu
+
+    # 4. Sample delta ~ N(Sigma_delta @ h_total, Sigma_delta)
+    L_chol = jnp.linalg.cholesky(prec_total)
+    mean_delta = jax.scipy.linalg.cho_solve((L_chol, True), h_total)
+    eta = jax.random.normal(key, shape=(K,), dtype=jnp.float32)
+    noise_delta = jax.scipy.linalg.solve_triangular(L_chol.T, eta, lower=False)
+    delta = mean_delta + noise_delta
+
+    # 5. Apply exact subspace update to leaf trees, forest fits, and residual
+    shift_mu_data = jnp.einsum('tsk,k->ts', A_mu, delta)
+    new_leaf_tree_mu = forest_mu.leaf_tree + shift_mu_data / forest_mu.leaf_unit
     forest_mu_new = eqx.tree_at(lambda f: f.leaf_tree, forest_mu, new_leaf_tree_mu)
-    mu_fit_new = jnp.where(accept, mu_fit_prop, mu_fit)
+    mu_fit_new = mu_fit + J_mu @ delta
 
-    new_leaf_tree_nu = jnp.where(accept, prop_leaf_tree_nu, forest_nu.leaf_tree)
+    shift_nu_data = jnp.einsum('tsk,k->ts', A_nu, delta)
+    new_leaf_tree_nu = forest_nu.leaf_tree + shift_nu_data / forest_nu.leaf_unit
     forest_nu_new = eqx.tree_at(lambda f: f.leaf_tree, forest_nu, new_leaf_tree_nu)
-    nu_fit_new = jnp.where(accept, nu_fit_prop, nu_fit)
+    nu_fit_new = nu_fit + J_nu @ delta
 
-    R_new = jnp.where(accept, R_prop, R)
+    R_new = jnp.where(obs_mask, R - H @ delta, 0.0)
 
     return forest_mu_new, mu_fit_new, forest_nu_new, nu_fit_new, R_new
