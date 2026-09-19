@@ -32,3 +32,14 @@ def unbalanced_panel():
 @pytest.fixture
 def binary_panel():
     return make_staggered_panel(seed=7, binary=True)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _clear_jax_compilation_cache():
+    yield
+    import gc
+    import jax
+
+    jax.clear_caches()
+    gc.collect()
+

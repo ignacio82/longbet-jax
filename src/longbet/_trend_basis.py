@@ -609,98 +609,18 @@ def trend_block_step(
     sample_beta: bool,
     conditional_precision: Float32[Array, ' n'] | None = None,
     temperature: Float32[Array, ''] = jnp.float32(1.0),
+    trend_gram: Float32[Array, 'q_tot q_tot'] | None = None,
+    trend_unit_sum: Float32[Array, 'q_tot N_units'] | None = None,
 ) -> tuple[
     Float32[Array, ' q_tot'],
     Float32[Array, ' N_units'],
     Float32[Array, ' S_max_plus_1'],
     Float32[Array, ' n'],
 ]:
-    """Draw ``(c, gamma, beta)`` from their exact joint Gaussian conditional.
-
-    Conditional on the two forests and on ``sigma^2``, the model is linear in
-    the trend coefficients ``c``, the unit intercepts ``gamma`` and the exposure
-    trajectory ``beta``, with Gaussian priors on all three. Their joint
-    conditional is therefore exactly Gaussian, and this function samples from
-    it: acceptance probability one, no step size, no tuning.
-
-    Sampling the three **jointly** rather than in sequence is the point. They
-    are strongly dependent -- the trend, the unit levels and the exposure
-    profile all bid for the same post-adoption movement -- and a coordinate-wise
-    Gibbs sweep through dependent Gaussian blocks moves along the ridge at a
-    rate set by their correlation, which is exactly the pathology the
-    diverging-trend designs exhibit. A joint draw has no such rate.
-
-    Implementation
-    --------------
-    Three reparameterizations keep the cost and the conditioning under control.
-
-    ``gamma`` is marginalized analytically. Its precision block is diagonal --
-    a unit intercept touches only its own cells -- so the Schur complement
-    ``P_ww - P_w,gamma diag(p_gamma)^-1 P_gamma,w`` costs
-    ``O((q_tot + S)^2 N)`` rather than a factorization of an
-    ``(q_tot + S + N)``-dimensional matrix. ``gamma`` is then drawn from its
-    (diagonal, hence trivial) conditional given the sampled ``(c, beta)``.
-
-    ``beta`` is whitened as ``beta = L u`` with ``L L' = K_tilde``, the same
-    device :func:`longbet._gp.sample_beta_gp` uses. The prior precision of ``u``
-    is the identity, so ``K_tilde^-1`` is never formed and the joint precision
-    is well conditioned however flat the kernel is.
-
-    ``c`` is whitened the same way, by its own prior scale: the draw is taken in
-    ``w = c / s`` with design ``H diag(s)``, so the prior precision of ``w`` is
-    again the identity and the sampled coefficient is recovered as ``c = s w``.
-    This is not cosmetic. Under the horseshoe ``s_j = tau lambda_j`` is a
-    *sampled* quantity that is supposed to become very small for the null
-    columns; in the precision parameterization that puts entries of order
-    ``s_j^-2`` on the diagonal of ``P_cc``, and a float32 Cholesky of a matrix
-    whose diagonal spans many orders of magnitude loses the small, informative
-    directions. Whitening moves the shrinkage into the design, where a small
-    ``s_j`` simply makes a column contribute nothing and costs no conditioning
-    at all. The two parameterizations define the same conditional; only one of
-    them survives single precision.
-
-
-    Parameters
-    ----------
-    key
-        PRNG key.
-    trend_coef, gamma, beta
-        Current values of the three blocks.
-    R
-        Full-model residual in data units, zero on unobserved cells.
-    H
-        Trend design matrix from :func:`build_trend_design`, shape
-        ``(n, q_tot)``.
-    d_vec
-        Treatment factor with the trajectory removed, ``b_Z nu(X_i, t)``.
-    obs_mask, unit_idx, N_units, exposure_idx
-        Panel bookkeeping.
-    sigma2, sigma_gamma2
-        Current innovation and intercept variances.
-    K_chol
-        Lower Cholesky factor of the marginalized GP kernel.
-    trend_col_scale
-        Per-column prior standard deviation of the trend coefficients, shape
-        ``(q_tot,)``. Fixed under the ridge prior
-        (:func:`trend_prior_scales`); under the horseshoe the interaction
-        entries are the current ``tau lambda_j`` from
-        :func:`horseshoe_col_scales` and therefore change every sweep.
-    random_intercept, sample_beta
-        Which blocks are live; a dead block is left untouched and dropped from
-        the joint draw.
-    conditional_precision
-        Per-cell precision under the SUR likelihood. ``None`` selects the scalar
-        ``temperature / sigma^2``.
-    temperature
-        Inverse temperature of the replica.
-
-    Returns
-    -------
-    trend_coef, gamma, beta, R
-        The sampled blocks and the residual they imply.
-    """
+    """Draw ``(c, gamma, beta)`` from their exact joint Gaussian conditional."""
+    scalar_prec = (temperature / sigma2).astype(jnp.float32)
     if conditional_precision is None:
-        cell_prec = jnp.where(obs_mask, temperature / sigma2, 0.0).astype(jnp.float32)
+        cell_prec = jnp.where(obs_mask, scalar_prec, 0.0).astype(jnp.float32)
     else:
         cell_prec = jnp.where(obs_mask, conditional_precision, 0.0).astype(jnp.float32)
 
@@ -708,12 +628,7 @@ def trend_block_step(
     S1 = L.shape[-1]
     q_tot = H.shape[1]
 
-    # Whiten the trend columns by their prior scale: the draw happens in
-    # w = c / s, whose prior precision is the identity. See the docstring --
-    # this is what lets the horseshoe drive s_j to ~0 without wrecking the
-    # float32 Cholesky.
     s_col = jnp.asarray(trend_col_scale, dtype=jnp.float32)
-    Hs = H * s_col[None, :]                          # (n, q_tot)
 
     # --- partial residual with all three blocks removed ---------------------
     trend_fit = H @ trend_coef
@@ -724,11 +639,19 @@ def trend_block_step(
         R_tilde = R_tilde + d_vec * beta[exposure_idx]
     R_tilde = jnp.where(obs_mask, R_tilde, 0.0)
 
-    Hw = Hs * cell_prec[:, None]                     # (n, q_tot)
-
-    # --- trend block ---------------------------------------------------------
-    P_cc = Hs.T @ Hw + jnp.eye(q_tot, dtype=jnp.float32)
-    h_c = Hw.T @ R_tilde
+    use_precomputed = (conditional_precision is None) and (trend_gram is not None)
+    if use_precomputed:
+        P_cc = (
+            scalar_prec * (s_col[:, None] * trend_gram * s_col[None, :])
+            + jnp.eye(q_tot, dtype=jnp.float32)
+        )
+        h_c = (scalar_prec * s_col) * (H.T @ R_tilde)
+        Hw = None
+    else:
+        Hs = H * s_col[None, :]                      # (n, q_tot)
+        Hw = Hs * cell_prec[:, None]                 # (n, q_tot)
+        P_cc = Hs.T @ Hw + jnp.eye(q_tot, dtype=jnp.float32)
+        h_c = Hw.T @ R_tilde
 
     # --- whitened trajectory block ------------------------------------------
     if sample_beta:
@@ -736,7 +659,10 @@ def trend_block_step(
         Dt = d_vec[:, None] * L[exposure_idx]        # (n, S1)
         Dtw = Dt * cell_prec[:, None]
         P_uu = Dt.T @ Dtw + jnp.eye(S1, dtype=jnp.float32)
-        P_cu = Hw.T @ Dt                             # (q_tot, S1)
+        if use_precomputed:
+            P_cu = s_col[:, None] * (H.T @ Dtw)      # (q_tot, S1)
+        else:
+            P_cu = Hw.T @ Dt                         # (q_tot, S1)
         h_u = Dtw.T @ R_tilde
         P_ww = jnp.block([[P_cc, P_cu], [P_cu.T, P_uu]])
         h_w = jnp.concatenate([h_c, h_u])
@@ -757,9 +683,12 @@ def trend_block_step(
             .add(cell_prec * R_tilde)
         )
         # P_{c,gamma}: sum of the precision-weighted design rows within a unit.
-        P_cg = (
-            jnp.zeros((N_units, q_tot), dtype=jnp.float32).at[unit_idx].add(Hw)
-        ).T                                          # (q_tot, N_units)
+        if use_precomputed and (trend_unit_sum is not None):
+            P_cg = (scalar_prec * s_col[:, None]) * trend_unit_sum
+        else:
+            P_cg = (
+                jnp.zeros((N_units, q_tot), dtype=jnp.float32).at[unit_idx].add(Hw)
+            ).T                                      # (q_tot, N_units)
         if sample_beta:
             P_ug = (
                 jnp.zeros((N_units, S1), dtype=jnp.float32).at[unit_idx].add(Dtw)

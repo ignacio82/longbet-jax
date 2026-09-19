@@ -172,6 +172,8 @@ class LongBetState(State):
     #: ``tau^2`` and its auxiliary ``xi``, per chain, scalars.
     trend_global2: Any = field(chains=CHAIN_AXIS, default=None)
     trend_global_aux: Any = field(chains=CHAIN_AXIS, default=None)
+    trend_gram: Any = field(default=None)
+    trend_unit_sum: Any = field(default=None)
 
     @property
     def is_tempered(self) -> bool:
@@ -699,6 +701,20 @@ def init_longbet(
         trend_local_aux=trend_local_aux,
         trend_global2=trend_global2,
         trend_global_aux=trend_global_aux,
+        trend_gram=(
+            jnp.where(obs_mask[:, None], trend_design, 0.0).T
+            @ jnp.where(obs_mask[:, None], trend_design, 0.0)
+            if use_trend_block
+            else None
+        ),
+        trend_unit_sum=(
+            jnp.zeros((N_units, q_tot), dtype=jnp.float32)
+            .at[unit_idx]
+            .add(jnp.where(obs_mask[:, None], trend_design, 0.0))
+            .T
+            if use_trend_block
+            else None
+        ),
         gamma_prior_a=config.gamma_prior_a,
         gamma_prior_b=config.gamma_prior_b,
         sigma_prior_a=config.sigma_prior_a,

@@ -548,6 +548,8 @@ def longbet_single_step(
             state.sample_beta,
             conditional_precision=conditional_precision,
             temperature=temp_tb,
+            trend_gram=state.trend_gram,
+            trend_unit_sum=state.trend_unit_sum,
         )
         if state.use_trend_horseshoe:
             # Scales given the coefficients just drawn. Ordering matters only
