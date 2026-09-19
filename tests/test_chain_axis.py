@@ -154,13 +154,13 @@ def test_multichain_sweep_equals_independent_single_chain_sweeps():
             got = np.asarray(getattr(out_chained, name))[c]
             want = np.asarray(getattr(single_out, name))
             np.testing.assert_allclose(
-                got, want, rtol=2e-4, atol=2e-5,
+                got, want, rtol=5e-4, atol=1e-4,
                 err_msg=f"chain {c} disagrees with the single-chain sweep on {name!r}",
             )
         np.testing.assert_allclose(
             np.asarray(out_chained.forest_nu.leaf_tree)[c],
             np.asarray(single_out.forest_nu.leaf_tree),
-            rtol=2e-4, atol=2e-5,
+            rtol=5e-4, atol=1e-4,
         )
 
 

@@ -34,12 +34,18 @@ def binary_panel():
     return make_staggered_panel(seed=7, binary=True)
 
 
+_MODULES_DONE = 0
+
+
 @pytest.fixture(autouse=True, scope="module")
 def _clear_jax_compilation_cache():
+    global _MODULES_DONE
     yield
-    import gc
-    import jax
+    _MODULES_DONE += 1
+    if _MODULES_DONE % 15 == 0:
+        import gc
+        import jax
 
-    jax.clear_caches()
-    gc.collect()
+        jax.clear_caches()
+        gc.collect()
 
