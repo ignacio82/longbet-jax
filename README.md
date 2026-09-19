@@ -194,7 +194,8 @@ their relative input order, with zero incoming loadings and unit latent variance
 Consequently, discrete outcomes have no freely estimated residual correlation
 with one another. Continuous outcomes retain their relative input order and
 may load on predecessors. Free loadings have independent
-$\mathcal N(0,\texttt{sur_prior_var})$ priors, with default variance one.
+$\mathcal N(0,v)$ priors, where the variance $v$ is `sur_prior_var`
+(default one).
 The full SUR precision enters the conditional updates, so downstream continuous
 outcomes can inform earlier mean surfaces and latent responses. `sur=False`
 removes residual coupling. Outcomes' unit-intercept priors remain separate.
