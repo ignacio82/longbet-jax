@@ -12,29 +12,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Exact conjugate subspace Gibbs inter-ensemble residual-transfer step for LongBet.
+"""Exact two-stage conjugate subspace Gibbs inter-ensemble residual-transfer step.
 
 On staggered panels where treated and control cohorts follow diverging baseline
-trends, the prognostic ensemble ``mu(X_i, t)`` and treatment ensemble
-``beta_{S_it} * nu(X_i, t)`` can trade off post-adoption level, calendar-time
-slope, and curvature on treated cells (Z_it = 1). Sequential Gibbs updates
-update one forest holding the other fixed, which can trap chains in local modes
-with elevated R-hat.
+trends, the prognostic ensemble ``mu(X_i)``, unit intercepts ``gamma_i``, and
+treatment component ``beta_{S_it} * nu(X_i, t)`` can trade off post-adoption
+level, calendar-time slope/curvature, and covariate-moderation profiles on
+treated cells (Z_it = 1). Sequential Gibbs updates update one component holding
+the others fixed, which can slow mixing along their shared affine subspace.
 
-This module implements an exact conjugate subspace Gibbs step that parameterizes
-an orthogonal 4-dimensional transfer subspace delta in R^4 spanning:
-  - constant level (1)
-  - linear calendar time trend (t_norm)
-  - quadratic calendar time curvature (t_norm^2 - 1/12)
-  - treatment exposure profile (w_norm)
-weighted by each prognostic leaf's squared treated observation fraction (p_trt^2),
-so pure untreated control leaves remain untouched. Because both the Gaussian
-likelihood (or probit/ordinal latent Gaussian likelihood) and the leaf priors
-are quadratic in the leaf values, the conditional posterior distribution
-p(delta | Y, trees, beta, sigma^2) is an exact 4-dimensional Gaussian
-distribution. Drawing delta from this conditional has 100% acceptance
-probability, requires no step-size tuning, and leaves the target joint posterior
-distribution strictly invariant.
+This module implements an exact two-stage conjugate Gaussian subspace Gibbs step:
+  - Stage 1 (8-D subspace ``delta in R^8``): jointly shifts the prognostic leaf
+    values ``mu_l``, unit intercepts ``gamma_i``, and treatment exposure curve
+    ``beta_s`` along unit-average polynomials ``(1, bar_t_i, bar_q_i, bar_w_i)``
+    and within-unit demeaned profiles ``(t_it - bar_t_i, q_it - bar_q_i,
+    w_it - bar_w_i)``, weighted on prognostic leaves by squared treated fraction
+    ``p_trt^2`` so pure control leaves remain untouched.
+  - Stage 2 (6-D subspace ``delta_het in R^6``): jointly shifts the prognostic
+    leaves ``mu_l`` and treatment leaves ``nu_l`` along the tensor product of
+    time polynomials ``(1, t_norm, q_norm)`` and standardized prognostic/treatment
+    covariate scores.
+
+Because both the Gaussian likelihood (or probit/ordinal latent Gaussian
+likelihood) and the leaf/intercept/GP priors are quadratic in the shifted
+parameters, each stage's conditional posterior distribution is an exact
+low-dimensional Gaussian distribution. Drawing from this conditional has 100%
+acceptance probability, requires no step-size tuning, and leaves the target
+joint posterior distribution strictly invariant.
 """
 
 from __future__ import annotations

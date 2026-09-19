@@ -12,7 +12,7 @@ the unit's (absorbing) treatment started and $0$ before it,
 
 $$
 Y_{it} = \mu(X_i, X^{\mathrm{tv}}_{it}) + \eta_{it}
-       + \beta_{S_{it}}\, \nu(X_i, X^{\mathrm{trt,tv}}_{it})\, \mathbf{1}\{S_{it} \ge 1\}
+       + \beta_{S_{it}}\, \nu(X_i, t, X^{\mathrm{trt,tv}}_{it})\, \mathbf{1}\{S_{it} \ge 1\}
        + \gamma_i + \epsilon_{it},
 \qquad \epsilon_{it} \sim \mathcal{N}(0, \sigma^2).
 $$
@@ -20,31 +20,34 @@ $$
 - **Prognostic and treatment forests ($\mu, \nu$).** $\mu$ is a prognostic sum of
   trees over baseline covariates $X_i$ and optional time-varying covariates
   $X^{\mathrm{tv}}_{it}$; $\nu$ is a treatment sum of trees over baseline
-  covariates $X_i$ (or a separate moderation matrix `x_trt`) and optional
-  time-varying covariates $X^{\mathrm{trt,tv}}_{it}$. Each tree has the BART
+  covariates $X_i$ (or a separate moderation matrix `x_trt`), calendar time $t$
+  (`split_calendar_trt = True`), and optional time-varying covariates
+  $X^{\mathrm{trt,tv}}_{it}$. Each tree has the BART
   prior: a node at depth $d$ splits with probability $\alpha/(1+d)^{\beta}$
   ($0.95/(1+d)^2$ prognostic, $0.25/(1+d)^3$ treatment) and leaf values are
   $\mathcal{N}(0, \tau^2)$ with $\tau = 3/(2\sqrt{m_\mu})$ and
-  $3/(3\sqrt{m_\nu})$ for $m$ trees on the standardized response.
+  $1/\sqrt{m_\nu}$ for $m$ trees on the standardized response.
 - **Conjugate calendar-time block ($\eta_{it}$, `use_trend_block = True`).**
   Within every adoption cohort $g_i$, calendar time $t$, unit identity $i$, and
-  exposure duration $S_{it} = t - g_i + 1$ are exactly collinear. Letting BART
-  trees split on $t$ forces local grow/prune steps to negotiate that ridge
-  against $(\gamma_i, \beta_S)$, trapping chains in distinct tree topologies.
-  By default (`split_calendar_mu = False`, `split_calendar_trt = False`), neither
-  forest splits on $t$; instead, smooth covariate-dependent calendar trends and
-  common period shocks are carried by the conjugate basis block
+  exposure duration $S_{it} = t - g_i + 1$ are exactly collinear. Letting the
+  prognostic BART forest split on $t$ forces local grow/prune steps to negotiate
+  that ridge against $(\gamma_i, \beta_S)$, trapping chains in distinct step-function
+  partitions. By default (`split_calendar_mu = False`, `split_calendar_trt = True`),
+  the prognostic forest omits $t$ while smooth covariate-dependent calendar
+  trends and common period shocks are carried by the conjugate basis block
   $$
   \eta_{it} = \Phi^{\mathrm{time}}_t c_0 + \sum_{k=1}^{d} \phi_k(t)\, b(X_i)^\top c_k,
   $$
-  where $\Phi^{\mathrm{time}} \in \mathbb{R}^{T \times p_t}$
-  ($p_t = \min(T - 1, 8)$, `trend_period_effects = True`, prior scale
-  `trend_period_scale = 2.0`) is a zero-sum Discrete Cosine Transform (DCT-II)
-  period basis, $\phi(t) \in \mathbb{R}^d$ ($d = 2$, `trend_degree = 2`) is an
-  orthonormal polynomial basis in normalized calendar time, and
-  $b(X_i) \in \mathbb{R}^{1 + p + F}$ combines an intercept, standardized linear
-  covariates, and $F = 64$ random Fourier features (`trend_num_features = 64`,
-  prior scale `trend_prior_scale = 2.0`, optional regularized horseshoe via
+  where $\Phi^{\mathrm{time}} \in \mathbb{R}^{T \times (T-1)}$
+  (`trend_period_effects = True`, prior scale `trend_period_scale = 2.0`) is an
+  orthonormal zero-sum Discrete Cosine Transform (DCT-II) period basis,
+  $\phi(t) \in \mathbb{R}^d$ ($d = 2$, `trend_degree = 2`) is an orthonormal
+  polynomial basis in normalized calendar time, and
+  $b(X_i) \in \mathbb{R}^{p + F}$ combines standardized linear covariates and
+  $F = 64$ column-centered random Fourier features (`trend_num_features = 64`,
+  total unit-trend prior scale `trend_prior_scale = 2.0` so each of the
+  $d(p + F)$ interaction coefficients has prior standard deviation
+  $\sigma_c / \sqrt{d(p + F)}$, with optional regularized horseshoe via
   `trend_horseshoe = True`). Crucially, the coefficient vector $c = (c_0, c_1, \dots, c_d)$
   is drawn **jointly in a single conjugate Gaussian block Gibbs step** with the
   unit intercepts $\gamma_i$ and the exposure trajectory $\beta_S$, eliminating
@@ -297,7 +300,7 @@ saveRDS(fit, "encouragement.rds"); fit <- readRDS("encouragement.rds")
 The shipped defaults (`use_trend_block = True`, `trend_degree = 2`,
 `trend_num_features = 64`, `trend_prior_scale = 2.0`, `trend_period_effects = True`,
 `trend_period_scale = 2.0`, `trend_horseshoe = False`, `split_calendar_mu = False`,
-`split_calendar_trt = False`, `split_exposure_trt = False`,
+`split_calendar_trt = True`, `split_exposure_trt = False`,
 `use_inter_ensemble_move = True`) are calibrated so that standard staggered-adoption
 panels mix reliably ($\widehat{R}_{\max} \le 1.05$, $\mathrm{ESS}_{\min} > 200$)
 without manual tuning—even when untreated trends diverge nonlinearly across
@@ -316,8 +319,8 @@ of `diag = pred.stability()`:
    in those calendar periods), any counterfactual comparison at exposure $s$
    relies on extrapolation. If $\widehat{R}_s \le 1.05$ on well-supported early
    exposures ($s = 1, \dots, S^*$) and only degrades at the tail where
-   `n_treated` is tiny, **do not enable tree splits on time**—simply report
-   exposures up to the supported horizon $S^*$ (or inspect the credible
+   `n_treated` is tiny, **do not enable prognostic tree splits on time**—simply
+   report exposures up to the supported horizon $S^*$ (or inspect the credible
    intervals, which widen automatically to reflect extrapolation uncertainty).
 2. **Check global chain agreement (`rhat_max`, `ess_min`).**
    If $\widehat{R}_s > 1.05$ or $\mathrm{ESS}_s < 100$ even at well-supported
@@ -328,8 +331,9 @@ of `diag = pred.stability()`:
 
 | Empirical setting / diagnostic symptom | Recommended configuration | Why |
 |---|---|---|
-| **Standard staggered panel** ($N \ge 100$, $T \in [4, 24]$, $p \le 30$) with parallel or diverging trends | **Keep all defaults** | The DCT period basis + degree-2 polynomial $\times$ 64 RFF block absorbs common period shocks and smooth $X_i \times t$ confounding while keeping $\mu$ and $\nu$ orthogonal to calendar time. |
-| **High-dimensional baseline covariates** ($p > 30$) where only a few covariates drive differential trends | `trend_horseshoe=True` (optionally `trend_num_features=32`) | Replaces the isotropic ridge prior on the $(1 + p + F)d$ trend interactions with a regularized Carvalho--Polson--Scott horseshoe prior (`trend_horseshoe_tau0=0.1`), shrinking irrelevant covariate-by-time slopes toward zero. |
+| **Standard staggered panel** ($N \ge 100$, $T \in [5, 24]$, $p \le 30$) with parallel or diverging trends | **Keep all defaults** | The DCT period basis + degree-2 polynomial $\times$ 64 RFF block absorbs common period shocks and smooth $X_i \times t$ confounding while keeping $\mu$ free of calendar-time splits. |
+| **Ultra-short panel** ($T \le 4$) | `trend_degree=1` | Uses linear unit time slopes $\phi_1(t)\,b(X_i)$ when $T \le 4$ offers too few pre-treatment periods per cohort to separate quadratic curvature from the exposure curve. |
+| **High-dimensional baseline covariates** ($p > 30$) where only a few covariates drive differential trends | `trend_horseshoe=True` (optionally `trend_num_features=32`) | Replaces the isotropic ridge prior on the $(p + F)d$ trend interactions with a regularized Carvalho--Polson--Scott horseshoe prior (`trend_horseshoe_tau0=0.1`), shrinking irrelevant covariate-by-time slopes toward zero. |
 | **Long panels ($T \ge 25$)** with multi-inflection unit trends | `trend_degree=3` | Adds cubic Legendre time polynomials $\phi_3(t)\,b(X_i)$. Avoid `trend_degree=3` on short panels ($T \le 12$), where cubic cohort-by-covariate slopes are weakly identified. |
 | **Sharp discontinuous calendar regime shifts** that affect only a subset of covariate profiles (e.g. a policy shock hitting one industry in period $t_0$) | Pass a time-varying indicator in `x_tv` (preferred), or set `split_calendar_mu=True` | Passing known regime indicators in `x_tv` lets $\mu$ split on them without opening the full calendar clock $t$. Only set `split_calendar_mu=True` if the timing of the interaction shock is unknown, and monitor `pred.stability()`. |
 | **Abrupt or step-change treatment dynamics** over exposure $S$ (rather than smooth build-up/decay) | `kernel_type="matern32"` (or `"ar1"`), `lambda_knl=1.0` | The default squared-exponential GP (`lambda_knl=2.0`) favors smooth trajectories; Matérn-3/2 or AR(1) with a shorter lengthscale allows sharper kinks between $S=1$ and $S=2$. |
