@@ -20,6 +20,8 @@ from typing import Any
 
 import equinox as eqx
 import jax
+
+from longbet._x64 import enable_x64
 import jax.numpy as jnp
 from jax import random
 from jaxtyping import Array, Float32, Int32, Key
@@ -91,7 +93,9 @@ def sample_loadings(
     return sample_from_precision(key, P, h)
 
 
+@enable_x64()
 @jax.jit
+@enable_x64(False)
 def multi_single_step(
     outcome_step_keys: Key[Array, 'M ...'],
     loading_keys: Key[Array, 'M ...'],
@@ -177,6 +181,7 @@ def multi_single_step(
     )
 
 
+@enable_x64()
 def multi_step(
     key: Key[Array, ''],
     multi_state: MultiLongBetState,

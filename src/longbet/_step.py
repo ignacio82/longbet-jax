@@ -126,6 +126,7 @@ def _tempered_single_step(key: Key[Array, ''], state: LongBetState) -> LongBetSt
 RIDGE_PROPOSAL_SIGMA = 0.2
 
 
+@enable_x64()
 @jax.jit
 @enable_x64(False)
 def longbet_single_step(
@@ -694,6 +695,7 @@ def longbet_single_step(
 
 
 @jax.jit
+@enable_x64()
 def longbet_step(key: Key[Array, ''], state: LongBetState) -> LongBetState:
     """Execute one Gibbs sweep, across chains if the state carries a chain axis.
 

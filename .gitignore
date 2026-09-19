@@ -31,3 +31,9 @@ gpu_startup_test.sh
 test_gpu_run.py
 scripts/run_gpu_cloud.sh
 docs/gpu_cloud_execution.md
+
+# Secrets, local environment & credentials
+.env
+.env.*
+.modal.toml
+*.token

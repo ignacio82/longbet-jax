@@ -105,6 +105,7 @@ import numpy as np
 from jaxtyping import Array, Bool, Float32, Int32, Key
 
 from longbet._linalg import sample_from_precision
+from longbet._x64 import enable_x64
 
 #: Seed of the random Fourier feature draw. Fixed, not user configurable and
 #: not derived from ``config.random_seed``: the feature map must be identical in
@@ -589,6 +590,16 @@ def horseshoe_col_scales(
     return jnp.concatenate([base_scale[:num_period], inter])
 
 
+@enable_x64()
+def trend_sufficient_statistics(H, obs_mask, unit_idx, N_units):
+    """Cache the fixed design cross-products without float32 cancellation."""
+    H_obs = jnp.where(obs_mask[:, None], jnp.asarray(H, jnp.float64), 0.0)
+    gram = H_obs.T @ H_obs
+    unit_sum = jnp.zeros((N_units, H.shape[1]), jnp.float64).at[unit_idx].add(H_obs).T
+    return gram, unit_sum
+
+
+@enable_x64()
 def trend_block_step(
     key: Key[Array, ''],
     trend_coef: Float32[Array, ' q_tot'],
@@ -617,18 +628,33 @@ def trend_block_step(
     Float32[Array, ' S_max_plus_1'],
     Float32[Array, ' n'],
 ]:
-    """Draw ``(c, gamma, beta)`` from their exact joint Gaussian conditional."""
-    scalar_prec = (temperature / sigma2).astype(jnp.float32)
-    if conditional_precision is None:
-        cell_prec = jnp.where(obs_mask, scalar_prec, 0.0).astype(jnp.float32)
-    else:
-        cell_prec = jnp.where(obs_mask, conditional_precision, 0.0).astype(jnp.float32)
+    """Draw the joint Gaussian conditional using float64 sufficient statistics.
 
-    L = jnp.asarray(K_chol, dtype=jnp.float32)
+    The Schur complement can subtract large, nearly equal precisions. Keep
+    cross-products, elimination and Cholesky in float64 instead of changing
+    the conditional with a data-dependent diagonal ridge. State and outputs
+    remain float32; the residual is computed from the rounded returned draws.
+    """
+    H = jnp.asarray(H, dtype=jnp.float64)
+    R = jnp.asarray(R, dtype=jnp.float64)
+    d_vec = jnp.asarray(d_vec, dtype=jnp.float64)
+    trend_coef = jnp.asarray(trend_coef, dtype=jnp.float64)
+    gamma = jnp.asarray(gamma, dtype=jnp.float64)
+    beta = jnp.asarray(beta, dtype=jnp.float64)
+    sigma2 = jnp.asarray(sigma2, dtype=jnp.float64)
+    sigma_gamma2 = jnp.asarray(sigma_gamma2, dtype=jnp.float64)
+    temperature = jnp.asarray(temperature, dtype=jnp.float64)
+    scalar_prec = (temperature / sigma2).astype(jnp.float64)
+    if conditional_precision is None:
+        cell_prec = jnp.where(obs_mask, scalar_prec, 0.0).astype(jnp.float64)
+    else:
+        cell_prec = jnp.where(obs_mask, conditional_precision, 0.0).astype(jnp.float64)
+
+    L = jnp.asarray(K_chol, dtype=jnp.float64)
     S1 = L.shape[-1]
     q_tot = H.shape[1]
 
-    s_col = jnp.asarray(trend_col_scale, dtype=jnp.float32)
+    s_col = jnp.asarray(trend_col_scale, dtype=jnp.float64)
 
     # --- partial residual with all three blocks removed ---------------------
     trend_fit = H @ trend_coef
@@ -643,14 +669,14 @@ def trend_block_step(
     if use_precomputed:
         P_cc = (
             scalar_prec * (s_col[:, None] * trend_gram * s_col[None, :])
-            + jnp.eye(q_tot, dtype=jnp.float32)
+            + jnp.eye(q_tot, dtype=jnp.float64)
         )
         h_c = (scalar_prec * s_col) * (H.T @ R_tilde)
         Hw = None
     else:
         Hs = H * s_col[None, :]                      # (n, q_tot)
         Hw = Hs * cell_prec[:, None]                 # (n, q_tot)
-        P_cc = Hs.T @ Hw + jnp.eye(q_tot, dtype=jnp.float32)
+        P_cc = Hs.T @ Hw + jnp.eye(q_tot, dtype=jnp.float64)
         h_c = Hw.T @ R_tilde
 
     # --- whitened trajectory block ------------------------------------------
@@ -658,7 +684,7 @@ def trend_block_step(
         # Row (i, t) of the whitened design is d_it * L[S_it, :].
         Dt = d_vec[:, None] * L[exposure_idx]        # (n, S1)
         Dtw = Dt * cell_prec[:, None]
-        P_uu = Dt.T @ Dtw + jnp.eye(S1, dtype=jnp.float32)
+        P_uu = Dt.T @ Dtw + jnp.eye(S1, dtype=jnp.float64)
         if use_precomputed:
             P_cu = s_col[:, None] * (H.T @ Dtw)      # (q_tot, S1)
         else:
@@ -674,11 +700,11 @@ def trend_block_step(
     # --- marginalize the (diagonal) unit intercepts --------------------------
     if random_intercept:
         p_gg = (
-            jnp.zeros(N_units, dtype=jnp.float32).at[unit_idx].add(cell_prec)
+            jnp.zeros(N_units, dtype=jnp.float64).at[unit_idx].add(cell_prec)
             + jnp.reciprocal(sigma_gamma2)
         )
         h_g = (
-            jnp.zeros(N_units, dtype=jnp.float32)
+            jnp.zeros(N_units, dtype=jnp.float64)
             .at[unit_idx]
             .add(cell_prec * R_tilde)
         )
@@ -687,11 +713,11 @@ def trend_block_step(
             P_cg = (scalar_prec * s_col[:, None]) * trend_unit_sum
         else:
             P_cg = (
-                jnp.zeros((N_units, q_tot), dtype=jnp.float32).at[unit_idx].add(Hw)
+                jnp.zeros((N_units, q_tot), dtype=jnp.float64).at[unit_idx].add(Hw)
             ).T                                      # (q_tot, N_units)
         if sample_beta:
             P_ug = (
-                jnp.zeros((N_units, S1), dtype=jnp.float32).at[unit_idx].add(Dtw)
+                jnp.zeros((N_units, S1), dtype=jnp.float64).at[unit_idx].add(Dtw)
             ).T                                      # (S1, N_units)
             P_wg = jnp.concatenate([P_cg, P_ug], axis=0)
         else:
@@ -706,15 +732,10 @@ def trend_block_step(
         P_eff = P_ww
         h_eff = h_w
 
-    # --- joint draw of (c, u) ------------------------------------------------
-    # The whitened prior contributes an identity block I, so P_eff has exact
-    # eigenvalues >= 1.0. Adding 1e-5 * diag(P_ww) (~80x float32 machine
-    # epsilon times the un-demeaned diagonal) prevents Schur-complement
-    # cancellation at extreme precisions while avoiding any O(k^3) eigh under
-    # jax.vmap.
-    P_eff_sym = 0.5 * (P_eff + P_eff.T) + jnp.diag(1e-5 * jnp.diag(P_ww))
+    # --- joint draw of (c, u), without modifying the posterior precision ----
+    P_eff_sym = 0.5 * (P_eff + P_eff.T)
     L_eff = jnp.linalg.cholesky(P_eff_sym)
-    eta_w = jax.random.normal(key, shape=h_eff.shape, dtype=jnp.float32)
+    eta_w = jax.random.normal(key, shape=h_eff.shape, dtype=jnp.float32).astype(jnp.float64)
     w_new = jax.scipy.linalg.cho_solve((L_eff, True), h_eff) + jax.scipy.linalg.solve_triangular(
         L_eff.T, eta_w, lower=False
     )
@@ -722,12 +743,12 @@ def trend_block_step(
     # Back to the interpretable parameterization: c = s w. Everything outside
     # this function -- the trace, save/load, predict, evaluate_trend -- sees
     # coefficients against the unscaled design H, so the whitening stays local.
-    trend_new = s_col * w_new[:q_tot]
+    trend_new = (s_col * w_new[:q_tot]).astype(jnp.float32)
     if sample_beta:
         u_new = w_new[q_tot:]
-        beta_new = L @ u_new
+        beta_new = (L @ u_new).astype(jnp.float32)
     else:
-        beta_new = beta
+        beta_new = beta.astype(jnp.float32)
 
     # --- unit intercepts given the sampled blocks ----------------------------
     if random_intercept:
@@ -739,7 +760,9 @@ def trend_block_step(
     else:
         gamma_new = gamma
 
-    # --- residual implied by the draw ---------------------------------------
+    gamma_new = gamma_new.astype(jnp.float32)
+
+    # --- residual implied by the rounded draw -------------------------------
     fitted = H @ trend_new
     if random_intercept:
         fitted = fitted + gamma_new[unit_idx]
@@ -747,7 +770,7 @@ def trend_block_step(
         fitted = fitted + d_vec * beta_new[exposure_idx]
     R_new = jnp.where(obs_mask, R_tilde - fitted, 0.0)
 
-    return trend_new, gamma_new, beta_new, R_new
+    return trend_new, gamma_new, beta_new, R_new.astype(jnp.float32)
 
 
 def evaluate_trend(

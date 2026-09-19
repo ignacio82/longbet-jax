@@ -55,7 +55,7 @@ from bartz.mcmcstep._axes import CHAIN_AXIS
 from longbet._config import LongBetConfig
 from longbet._gp import build_kernel_matrix, kernel_cholesky
 from longbet._ordinal import full_cutpoints, prepare_ordinal, sample_ordinal_latents
-from longbet._trend_basis import init_horseshoe, trend_prior_scales
+from longbet._trend_basis import init_horseshoe, trend_prior_scales, trend_sufficient_statistics
 from longbet._x64 import enable_x64
 
 #: Which leaves carry a chain axis is **not** hardcoded here.  ``bartz``
@@ -634,6 +634,11 @@ def init_longbet(
     resid_init = state_mu.resid * state_mu.resid_unit
     resid_init = jnp.where(obs_mask, resid_init, 0.0).astype(jnp.float32)
 
+    trend_gram, trend_unit_sum = (
+        trend_sufficient_statistics(trend_design, obs_mask, unit_idx, N_units)
+        if use_trend_block else (None, None)
+    )
+
     state = LongBetState(
         _chain_anchor=state_mu._chain_anchor,
         X=state_mu.X,
@@ -701,20 +706,8 @@ def init_longbet(
         trend_local_aux=trend_local_aux,
         trend_global2=trend_global2,
         trend_global_aux=trend_global_aux,
-        trend_gram=(
-            jnp.where(obs_mask[:, None], trend_design, 0.0).T
-            @ jnp.where(obs_mask[:, None], trend_design, 0.0)
-            if use_trend_block
-            else None
-        ),
-        trend_unit_sum=(
-            jnp.zeros((N_units, q_tot), dtype=jnp.float32)
-            .at[unit_idx]
-            .add(jnp.where(obs_mask[:, None], trend_design, 0.0))
-            .T
-            if use_trend_block
-            else None
-        ),
+        trend_gram=trend_gram,
+        trend_unit_sum=trend_unit_sum,
         gamma_prior_a=config.gamma_prior_a,
         gamma_prior_b=config.gamma_prior_b,
         sigma_prior_a=config.sigma_prior_a,

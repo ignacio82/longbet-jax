@@ -1,0 +1,197 @@
+# Specification template for ideas/IMPLEMENTATION_PLAN.md (sections 8.7, 9 and 10).
+# It is not an executable benchmark until the harness exists.
+# `python -m benchmarks.continuous_dose.run --phase confirm` must refuse a protocol whose
+# `status` is not `frozen` or that still contains a `null` in a field marked REQUIRED.
+protocol_version: 2
+status: proposed_unfrozen          # proposed_unfrozen -> development -> frozen
+repository: ignacio82/longbet-jax
+audit_commit: bfe845da03172631ec280ff40a6f15f174f1ee34
+implementation_commit: null        # REQUIRED
+frozen_on: null                    # REQUIRED, ISO date
+paper:
+  url: https://psantanna.com/files/CGBS_v4.pdf
+  draft_date: '2025-12-31'
+  sha256: null                     # REQUIRED: the URL may be updated in place
+reference_environment:
+  contdid_commit: null             # REQUIRED: GitHub only, alpha (0.1.1 when the plan was written)
+  npiv_commit: null                # REQUIRED
+  r_version: null                  # REQUIRED
+  r_lockfile_sha256: null          # REQUIRED
+  official_example_reproduced: null  # REQUIRED: true, with the log path in the status file
+python_environment:
+  lockfile_sha256: null            # REQUIRED
+  jax_version: null
+  bartz_version: 0.12.1            # pinned; the engine imports private bartz modules
+  arviz_version: null
+  backend: null                    # cpu | gpu, with device name
+  engine_precision: float64        # plan 5.5; float32 only after separate validation
+scope:
+  response: gaussian_continuous
+  dose: fixed_positive_after_absorbing_adoption
+  panel: balanced_regularly_spaced
+  max_periods_first_release: 20
+  untreated_at_baseline: required
+  never_treated_group: required
+  pretreatment_covariates_only: true
+  missing_values: reject_first_release
+  dose_outside_fitted_knots: reject
+model:
+  public_class: LongBetDose
+  likelihood: one_first_difference_vector_per_unit
+  residual_covariance: unstructured          # unstructured | difference_iid
+  covariance_prior: {df: q_plus_3, scale: two_times_unit_diagonal_difference_matrix}
+  standardize: true
+  treatment_leaves: whitened_dose_bspline_by_exposure_grid
+  dose_basis: {degree: 3, dim: 6, interior_knots: training_tertiles, penalty: 4.0}
+  exposure_kernel: {type: se, lengthscale: 1.0, constant_mean: true, normalized: unit_mean_diagonal}
+  prognostic_leaves: {dim: q, prior_correlation: 0.5}
+  leaf_scales: {tau_pr: 1.5, tau_trt: 1.0}
+  tree_prior: {pr: [0.95, 2.0], trt: [0.25, 3.0], max_depth_pr: 5, max_depth_trt: 4}
+  min_units_per_leaf: {pr: 10, trt: 10}      # units, never panel rows
+  num_trees: {pr: null, trt: null}           # REQUIRED: frozen by the mixing pilot (plan 9.4)
+  moves: null                                # REQUIRED: frozen by the mixing pilot
+  hyperparameters_sampled: none
+  tuning_candidates: {dose_basis_dim: [5, 6, 8], dose_penalty: [1, 4, 16]}
+  tuning_data: development_replications_only
+mcmc:
+  independent_chains: 4
+  burnin_per_chain: 2000
+  retained_per_chain: 1000
+  escalation: [E0_defaults, E1_double, E2_quadruple, E3_pilot_chosen_moves_or_tempering]
+  escalation_trigger: diagnostics_only       # never a new seed, never an effect estimate
+  time_cap_seconds_per_fit: null             # REQUIRED
+  adaptation_after_burnin: forbidden
+  thinning_for_diagnostics: 1
+  rhat_max: 1.01
+  bulk_ess_min: 400
+  tail_ess_min: 400
+  tail_probabilities: [0.025, 0.975]
+  mean_mcse_over_sd_max: 0.05                # from mean ESS, not bulk ESS
+  gated_quantities:                          # plan 9.1; dense grids are reported, not gated
+    - att_by_exposure_and_overall
+    - dose_response_at_dose_quantiles_10_30_50_70_90_x_first_mid_last_supported_exposure
+    - acr_at_dose_quantiles_30_50_70_x_same_exposures
+    - two_scenario_defined_subgroup_contrasts
+    - log_det_V
+    - trace_V
+    - log_likelihood
+    - mean_leaves_per_tree_each_forest
+  undefined_or_constant_diagnostics: fail_except_verified_structural_constants
+  tempering_replicas_are_not_independent_chains: true
+gate_1_sampler_exactness:
+  oracle_self_checks: required               # tests/_dose_reference.py
+  algebra_parity_relative_tolerance: 1.0e-9
+  fixed_tree_joint_gaussian_posterior: required
+  enumerated_tree_posterior:
+    fixture: {n: 14, T: 4, K: 4, max_split: [2, 1], max_depth: 3, trees: 22}
+    one_tree_tv_max: 0.03
+    one_tree_with_min_units_veto_tv_max: 0.03
+    two_trees_joint_tv_max: 0.05
+    flat_likelihood_recovers_prior_tv_max: 0.03
+    rerun_with_every_move_enabled: required
+    mutation_arms_tv_min: 0.08
+    mutation_arms_ratio_to_correct_min: 5
+  bartz_equivalence: [scalar_bart_q1_K1, multivariate_bart_identity_design]
+  geweke:
+    standardize: false
+    count_thresholds: off
+    closed_form_marginals: [whitened_forest_value_at_fixed_x, wishart_precision, leaves_per_tree]
+    z_max: 4
+    mutation_arms_must_move_a_statistic_by_se: 6
+  mutation_arms_use_new_function_objects: true   # jax.jit caches traces by function identity
+  existing_model_regressions: required
+sbc:
+  design: {N: 80, T: 4}
+  replications: 100
+  thinned_draws_per_rank: 99
+  standardize: false
+  count_thresholds: off
+  quantities: [f_at_three_points, one_derivative, one_contrast, one_prognostic_value, log_det_V, trace_V, joint_log_likelihood]
+  decision: simultaneous_rank_ecdf_envelopes
+  prior_only_mutant_must_be_flagged: true
+convergence_scenarios:                       # plan 9.3, three data seeds each
+  C1: {family: D2, T: 2, N: 1000}
+  C2: {family: D3_step, T: 2, N: 1000}
+  C3: {family: D4, T: 12, cohorts: [4, 7, 10]}
+  C4: {family: weak_signal, T: 6, N: 200}
+  pass_rule: every_scenario_and_seed_passes_at_one_common_escalation_level
+  robustness_arm: {init_prior_sweeps: 25, chains: 8, scenarios: [C2, C3]}
+benchmarks:
+  native_primary_reference: contdid_cck_two_period
+  contdid_explicit_arguments:                # the documentation disagrees with itself about defaults
+    target_parameter: level
+    aggregation: dose
+    treatment_type: continuous
+    dose_est_method: cck
+    control_group: nevertreated
+    bstrap: true
+    cband: null                              # REQUIRED: true for simultaneous comparisons
+    biters: 999
+    dvals: common_grid
+    never_treated_gname: 0
+  additional_references:
+    - tuned_dose_spline_did
+    - bayesian_dose_spline_same_engine_max_depth_trt_1
+    - randomized_design_crossfitted_covariate_adjusted_comparator
+  panel_references:
+    - native_contdid_parametric_spline_where_estimands_match
+    - validated_cohort_period_adapter_with_joint_unit_resampling
+  development_replications_per_family: 40
+  confirmation_replications_per_primary_cell: 500
+  nearby_variant_replications_per_cell: 200
+  primary_families: [D2_high_dimensional_prognosis, D3_dose_covariate_heterogeneity]
+  development_grid: {prognostic_strength_c: [0.5, 1, 2], level_error_sd: [0.5, 1]}
+  primary_cells: null                        # REQUIRED: two per family; N, c, noise, control share, all DGP parameters
+  nearby_variants: null                      # REQUIRED
+  level_selection: alpha_correlated_with_covariates_and_dose
+  control_families: [D0_null_linear, D1_smooth_low_dimensional]
+  secondary_families: [D4_nonseparable_dynamics, D5_conditional_pt]
+  guard_and_stress_families: [D6_selection_on_gains, D7_support_and_misspecification]
+  positive_dose_support: [0.1, 1.0]
+  primary_dose_grid: {bounds: [0.15, 0.95], size: 41}
+  boundary_metrics: reported_separately
+  estimand_and_population_definition: null   # REQUIRED
+  aggregation_weights: null                  # REQUIRED
+  baseline_implementation_checksums: null    # REQUIRED
+  seed_derivation: numpy_SeedSequence_of_family_cell_replication_stream
+  streams: [data, mcmc, bootstrap]           # a bootstrap seed is not a data replication
+  confirmation_seed_manifest_sha256: null    # REQUIRED
+  fitter_access_to_simulation_truth: forbidden
+  truth_integration: analytic_or_independent_monte_carlo_with_error_bound
+  projected_cost_recorded_before_launch: null  # REQUIRED: one timed replication of every method
+superiority:
+  loss: matched_weighted_integrated_squared_effect_error
+  ratio: mean_loss_LongBetDose_over_mean_loss_reference
+  maximum_point_estimate_ratio: 0.80
+  upper_bound: paired_replication_bootstrap_one_sided_familywise_adjusted
+  upper_ratio_bound_exclusive: 1.0
+  primary_familywise_alpha: 0.05
+  number_of_primary_claims: null             # REQUIRED before per-claim levels are set
+  coverage_nominal: 0.95
+  minimum_lower_95_bound_for_coverage: 0.90
+  reference_coverage_noninferiority_margin: 0.02
+  simultaneous_coverage_required_for_band_claims: true
+  minimum_fit_and_mixing_success_fraction: 0.95
+  paired_success_only_metrics_labeled: true
+  failure_sensitive_loss_policy: null        # REQUIRED: capped or bounded loss, chosen in advance
+  all_failures_reported: true
+  nearby_variant_support_required: true
+  no_seed_replacement_after_failure: true
+outputs:
+  - implementation_and_environment_hashes
+  - all_replication_statuses_and_errors
+  - chain_preserving_functional_draws
+  - per_quantity_rhat_ess_mcse_initial_and_final
+  - acceptance_rates_by_move_and_forest
+  - exact_reference_and_geweke_test_logs
+  - sbc_rank_diagnostics
+  - bias_loss_coverage_width_simultaneous_coverage
+  - paired_uncertainty_for_loss_ratios_and_coverage_differences
+  - compile_time_separate_from_synchronized_sampling_time
+  - peak_memory_and_cost_per_effective_draw
+  - scenario_scoped_status_and_limitations
+allowed_final_statuses:
+  - VALIDATED_WITH_SCENARIO_ADVANTAGE
+  - VALIDATED_NO_CONFIRMED_ADVANTAGE
+  - VALIDATION_FAILED
+  - COMPARISON_INCOMPLETE
