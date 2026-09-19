@@ -11,19 +11,19 @@ For unit $i$ in a unit-spaced period $t$, exposure $S_{it}$ is $1$ in the
 first treated period, increases by one thereafter, and is $0$ before the
 unit's absorbing treatment starts. For a continuous outcome,
 
-$$
+```math
 Y_{it} = \mu(X_i, X^{\mathrm{tv}}_{it}) + \eta_{it}
        + \beta_{S_{it}}\, \nu(X_i, t, X^{\mathrm{trt,tv}}_{it})\, \mathbf{1}\{S_{it} \ge 1\}
        + \gamma_i + \epsilon_{it},
 \qquad \epsilon_{it} \sim \mathcal{N}(0, \sigma^2).
-$$
+```
 
 - **Prognostic and treatment forests ($\mu, \nu$).** $\mu$ is a prognostic sum of
   trees over baseline covariates $X_i$ and optional time-varying covariates
-  $X^{\mathrm{tv}}_{it}$; $\nu$ is a treatment sum of trees over baseline
+  $`X^{\mathrm{tv}}_{it}`$; $\nu$ is a treatment sum of trees over baseline
   covariates $X_i$ (or a separate moderation matrix `x_trt`), calendar time $t$
   (`split_calendar_trt = True`), and optional time-varying covariates
-  $X^{\mathrm{trt,tv}}_{it}$. Each tree has the BART
+  $`X^{\mathrm{trt,tv}}_{it}`$. Each tree has the BART
   prior: a node at depth $d$ splits with probability $\alpha/(1+d)^{\beta}$
   ($0.95/(1+d)^2$ prognostic, $0.25/(1+d)^3$ treatment) and leaf values are
   $\mathcal{N}(0, \tau^2)$ with $\tau = 3/(2\sqrt{m_\mu})$ and
@@ -34,9 +34,7 @@ $$
   can therefore be difficult for the sampler. By default, the prognostic
   forest excludes direct calendar-time splits and the treatment forest allows
   them. Common period effects and smooth differential trends are represented by
-  $$
-  \eta_{it} = \Phi^{\mathrm{time}}_t c_0 + \sum_{k=1}^{d} \phi_k(t)\, b(X_i)^\top c_k,
-  $$
+  $`\eta_{it} = \Phi^{\mathrm{time}}_t c_0 + \sum_{k=1}^{d} \phi_k(t)\, b(X_i)^\top c_k`$,
   where $\Phi^{\mathrm{time}} \in \mathbb{R}^{T \times (T-1)}$
   (`trend_period_effects = True`) is a complete centered DCT-II basis with
   orthogonal columns of unit mean square. Its coefficients have independent
@@ -68,7 +66,7 @@ $$
   common-period basis are enabled, and to `True` otherwise.
 - **Exposure trajectory ($\beta_S$).** $\beta_S$ is a Gaussian process over the
   exposure clock,
-  $\beta \sim \mathcal{N}\!\big(0,\, K + \sigma_m^2 \mathbf{1}\mathbf{1}^\top\big)$,
+  $`\beta \sim \mathcal{N}\!\big(0,\, K + \sigma_m^2 \mathbf{1}\mathbf{1}^\top\big)`$,
   with a squared-exponential (default), Matérn-3/2, Matérn-5/2 or AR(1) kernel
   $K$ of marginal variance $\sigma_k^2$ and lengthscale $\lambda$, and a constant
   mean marginalized into the kernel so projections beyond the fitted horizon
@@ -84,18 +82,18 @@ $$
   $\sigma^2 \sim \mathrm{IG}(2, 1)$ on the standardized scale and
   $\sigma_\gamma^2 \sim \mathrm{IG}(1, 0.1)$.
 - **Binary and ordinal outcomes.** Binary outcomes:
-  $Y_{it} = \mathbf{1}\{Y^*_{it} > 0\}$ with the same mean surface (including
-  $\eta_{it}$) for the latent $Y^*_{it}$ and unit innovation variance (probit).
+  $`Y_{it} = \mathbf{1}\{Y^*_{it} > 0\}`$ with the same mean surface (including
+  $\eta_{it}$) for the latent $`Y^*_{it}`$ and unit innovation variance (probit).
   Ordinal outcomes require `outcome="ordinal"`, `num_categories=K`, and numeric
   labels $0,\ldots,K-1$, with $K\ge2$:
-  $Y_{it}=k\iff\kappa_k<Y^*_{it}\le\kappa_{k+1}$, where
+  $`Y_{it}=k\iff\kappa_k<Y^*_{it}\le\kappa_{k+1}`$, where
   $\kappa_0=-\infty$, $\kappa_1=0$, and $\kappa_K=\infty$.
   The free ordered positive cutpoints have an ordered-normal prior with
   `cutpoint_prior_scale=5.0`; their log-gaps are updated by a marginalized
   Metropolis move. The latent innovation variance is fixed at one.
 
 For continuous outcomes under the default factorization, the treated-versus-untreated mean contrast is
-$\tau_t(X_i,S)=\beta_S\nu(X_i,t,X^{\mathrm{trt,tv}}_{it})$; the baseline and
+$`\tau_t(X_i,S)=\beta_S\nu(X_i,t,X^{\mathrm{trt,tv}}_{it})`$; the baseline and
 unit intercept cancel. `att()` averages this over treated cells at each
 exposure. For binary and ordinal outcomes, `att()` and `catt()` summarize
 **latent-scale** effects. Binary probability differences are
@@ -180,17 +178,17 @@ saveRDS(fit, "fit.rds"); fit <- readRDS("fit.rds")
 Outcomes share the panel, covariate design, treatment schedule, and
 calendar-time basis. Each has its own forests, trend coefficients, exposure
 trajectory, and unit intercepts: there is no shared treatment forest or shared
-exposure curve across outcomes. Write $f^{(m)}_{it}$ for outcome $m$'s full
+exposure curve across outcomes. Write $`f^{(m)}_{it}`$ for outcome $m$'s full
 LongBet mean surface, including calendar-time moderation. With `sur=True`
 (the default), a triangular seemingly unrelated regression couples the residuals:
 
-$$
+```math
 Y^{*(m)}_{it} = f^{(m)}_{it}
              + \sum_{j < m} \Gamma_{mj}\big(Y^{*(j)}_{it}-f^{(j)}_{it}\big) + \epsilon^{(m)}_{it},
 \qquad \epsilon^{(m)}_{it} \sim \mathcal{N}(0, \sigma_m^2),
-$$
+```
 
-where $Y^*$ denotes the internally standardized continuous response or the
+where $`Y^*`$ denotes the internally standardized continuous response or the
 latent probit response. Binary and ordinal outcomes are placed first, preserving
 their relative input order, with zero incoming loadings and unit latent variance.
 Consequently, discrete outcomes have no freely estimated residual correlation
@@ -206,7 +204,7 @@ in the internal ordering to be observed in that cell. Arbitrary missingness
 patterns are not supported; incompatible masks raise an error.
 
 Posterior draws are aligned across outcomes, permitting joint events such as
-$\Pr(\tau^{(1)}>0,\tau^{(2)}<0)$. `effect_draws()` and `joint_prob()` require
+$`\Pr(\tau^{(1)}>0,\tau^{(2)}<0)`$. `effect_draws()` and `joint_prob()` require
 full prediction draws (`summary_only=False`). Continuous effects stay in the
 supplied outcome units; binary effects are probability differences
 $\Phi(m_0+\tau)-\Phi(m_0)$. Those helpers do not accept ordinal outcomes;
@@ -263,10 +261,10 @@ not a joint model with estimated outcome/frailty correlation.
 **Outcome on the adoption clock.** With $S^D_{it}$ the periods since unit $i$
 adopted (0 before adoption),
 
-$$
+```math
 Y_{it} = \mu_Y(X_i) + \eta^Y_{it} + \beta^Y_{S^D_{it}}\, \nu_Y(X_i,t)\, \mathbf{1}\{S^D_{it} \ge 1\}
        + \gamma^Y_i + \epsilon^Y_{it}.
-$$
+```
 
 This is the model of Section 1 with adoption as the treatment; both arms
 contribute adoption events. The treatment term models the adoption response,
@@ -279,12 +277,12 @@ these assumptions about adoption.
 
 **Adoption as a discrete-time hazard on the offer clock.** With $S^Z_{it}$ the
 periods since the offer (0 for the control arm), the hazard of first adoption
-on the at-risk set $\{D_{i,t-1} = 0\}$ is
+on the at-risk set $`\{D_{i,t-1} = 0\}`$ is
 
-$$
+```math
 \lambda_{it} = \Pr(D_{it} = 1 \mid D_{i,t-1} = 0)
 = \Phi\!\Big(\mu_D(X_i) + \eta^D_{it} + \beta^D_{S^Z_{it}}\, \nu_D(X_i,t)\, \mathbf{1}\{S^Z_{it} \ge 1\} + u_i\Big),
-$$
+```
 
 a binary LongBet fitted to the first-adoption indicator with the cells after
 adoption masked out; the unit intercept $u_i \sim \mathcal{N}(0, \sigma_u^2)$
@@ -293,16 +291,16 @@ is a frailty.
 **Composition.** Conditional on a frailty draw, under an offer schedule $z$
 the hazard equation gives the
 probability of adopting first in period $a$,
-$\pi_a(x, z) = \lambda_a \prod_{s < a}(1 - \lambda_s)$, and of having adopted
+$`\pi_a(x, z) = \lambda_a \prod_{s < a}(1 - \lambda_s)`$, and of having adopted
 by $t$, $P_t(x, z) = 1 - \prod_{s \le t}(1 - \lambda_s)$; the outcome equation
 gives the continuous response $\tau_t(x,s)=\beta^Y_s\nu_Y(x,t)$ to having adopted $s$
 periods ago. The offer's effects are
 
-$$
+```math
 \mathrm{CITT}_Y(x, t) = \sum_{a \le t} \big[\pi_a(x, 1) - \pi_a(x, 0)\big]\, \tau_t(x,\, t - a + 1),
 \qquad
 \mathrm{CITT}_D(x, t) = P_t(x, 1) - P_t(x, 0),
-$$
+```
 
 For binary outcomes, substitute the corresponding probability contrast for
 $\tau_t$. The two prediction interfaces use different target populations:
@@ -326,7 +324,7 @@ $\tau_t$. The two prediction interfaces use different target populations:
   clips negative adoption contrasts to zero in postprocessing; it does not
   constrain the fitted hazard model to be monotone. The field called `cace`
   is the **stabilized** draw-wise ratio
-  $\mathrm{CITT}_Y/(\max(\mathrm{CITT}_D,0)+0.02)$ by default. The positive
+  $`\mathrm{CITT}_Y/(\max(\mathrm{CITT}_D,0)+0.02)`$ by default. The positive
   `cace_stabilization` parameter controls this denominator adjustment, which
   changes the estimand and must not be presented as the ordinary Wald ratio.
   With `monotonic_first_stage=False`, the clipping is disabled.
@@ -387,7 +385,7 @@ identification, or interval coverage. The scalar diagnostic defaults require
 rank-normalized split $\widehat R\le1.01$ and both bulk and tail ESS of at least
 $400$ at every reported exposure. `ess_ok` and `rhat_ok` are threshold checks;
 the scalar `reliable` field is deliberately `None` and its verdict is withheld.
-The looser $\widehat R>1.05$ or bulk ESS below $100$ criteria identify warnings;
+The looser $`\widehat R>1.05`$ or bulk ESS below $100$ criteria identify warnings;
 they are not the software's default acceptance thresholds.
 
 ### Inspect support and posterior draws
