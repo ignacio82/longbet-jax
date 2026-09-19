@@ -47,6 +47,7 @@ import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float32, Int32, Key
 
 from bartz.mcmcstep._step import apply_moves_to_leaf_indices
+from longbet._linalg import sample_from_precision
 from longbet._ridge import compute_active_leaf_stats
 
 
@@ -134,7 +135,6 @@ def inter_ensemble_transfer_step(
     leaf_prior_cov_inv_nu: Float32[Array, ''],
     conditional_precision: Float32[Array, ' n'] | None = None,
     temperature: Float32[Array, ''] = jnp.float32(1.0),
-    proposal_sigma: float = 0.05,
     min_abs_beta: float = 0.05,
     unit_idx: Int32[Array, ' n'] | None = None,
     N_units: int | None = None,
@@ -142,7 +142,6 @@ def inter_ensemble_transfer_step(
     y_vec: Float32[Array, ' n'] | None = None,
 ) -> tuple[Any, Float32[Array, ' n'], Any, Float32[Array, ' n'], Float32[Array, ' n']]:
     """Execute one exact conjugate subspace Gibbs transfer step between mu and nu leaves."""
-    del proposal_sigma
     denom_t = jnp.float32(max(1, T_periods - 1))
     t_norm = (time_idx.astype(jnp.float32) - 0.5 * denom_t) / denom_t
     t_quad = jnp.square(t_norm) - jnp.float32(1.0 / 12.0)
@@ -260,15 +259,11 @@ def inter_ensemble_transfer_step(
     prec_nu = leaf_prior_cov_inv_nu * (A_nu_flat.T @ A_nu_flat)
     h_nu = -leaf_prior_cov_inv_nu * (A_nu_flat.T @ curr_nu_flat)
 
-    prec_total = prec_lik + prec_mu + prec_nu + jnp.eye(K, dtype=jnp.float32) * 1e-5
+    prec_total = prec_lik + prec_mu + prec_nu
     h_total = h_lik + h_mu + h_nu
 
     # 4. Sample delta ~ N(Sigma_delta @ h_total, Sigma_delta)
-    L_chol = jnp.linalg.cholesky(prec_total)
-    mean_delta = jax.scipy.linalg.cho_solve((L_chol, True), h_total)
-    eta = jax.random.normal(key, shape=(K,), dtype=jnp.float32)
-    noise_delta = jax.scipy.linalg.solve_triangular(L_chol.T, eta, lower=False)
-    delta = mean_delta + noise_delta
+    delta = sample_from_precision(key, prec_total, h_total)
 
     # 5. Apply exact subspace update to leaf trees, forest fits, and residual
     shift_mu_data = jnp.einsum('tsk,k->ts', A_mu, delta)
@@ -478,16 +473,16 @@ def inter_ensemble_beta_gamma_step(
         + prec_mu
         + prec_gamma
         + prec_beta
-        + jnp.eye(K, dtype=jnp.float32) * 1e-5
     )
     h_total = h_lik + h_mu + h_gamma + h_beta
 
     # 5. Sample theta ~ N(Sigma_theta @ h_total, Sigma_theta)
-    L_chol = jnp.linalg.cholesky(prec_total)
-    mean_theta = jax.scipy.linalg.cho_solve((L_chol, True), h_total)
-    eta = jax.random.normal(key, shape=(K,), dtype=jnp.float32)
-    noise_theta = jax.scipy.linalg.solve_triangular(L_chol.T, eta, lower=False)
-    theta = mean_theta + noise_theta
+    #
+    # The subspace is not guaranteed to have full rank. On a single-period
+    # panel the normalized calendar coordinate is constant, so the {1, t}
+    # directions coincide and two of the eight directions vanish. See
+    # ``longbet._linalg``.
+    theta = sample_from_precision(key, prec_total, h_total)
 
     # 6. Apply exact subspace updates
     shift_mu_data = jnp.einsum('tsk,k->ts', A_mu, theta)

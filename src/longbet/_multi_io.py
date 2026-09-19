@@ -147,6 +147,10 @@ def save_multi_npz(model: LongBetMulti, path: str | Path) -> None:
     if model.trace is None or model.design_ is None:
         raise RuntimeError("Cannot save an unfitted LongBetMulti model.")
 
+    # Local, like the loader's: longbet._model imports this module's siblings,
+    # so a module-level import would be circular.
+    from longbet._model import LongBet
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -182,6 +186,17 @@ def save_multi_npz(model: LongBetMulti, path: str | Path) -> None:
             if model.fitted_t_ is not None
             else None
         ),
+        # The shared calendar-time block. Serialized by the *scalar* model's
+        # own method -- it reads only ``trend_time_basis_``,
+        # ``trend_period_basis_`` and ``trend_feature_spec_``, which
+        # LongBetMulti carries under the same names -- so the two archive
+        # formats cannot drift apart. ``None`` when the fit had no block, and
+        # older archives without the key load as ``None`` too.
+        "trend_basis": (
+            LongBet._trend_basis_to_dict(model)
+            if getattr(model, "trend_time_basis_", None) is not None
+            else None
+        ),
     }
 
     if "ordinal" in model.outcome:
@@ -206,6 +221,12 @@ def save_multi_npz(model: LongBetMulti, path: str | Path) -> None:
             arrays[f"outcome_{m}_cutpoints"] = np.asarray(tr.cutpoints)
         for k in _PARAM_KEYS:
             arrays[f"outcome_{m}_{k}"] = np.asarray(getattr(tr, k))
+        # As in ``longbet._io.save_npz``: written only when the fit had a trend
+        # block, so archives of fits without one stay byte-compatible with
+        # readers that predate it.
+        trend_coef = getattr(tr, "trend_coef", None)
+        if trend_coef is not None and np.asarray(trend_coef).shape[-1] > 0:
+            arrays[f"outcome_{m}_trend_coef"] = np.asarray(trend_coef)
         for prefix, sub in (("mu", tr.mu_trace), ("nu", tr.nu_trace)):
             for key in _FOREST_KEYS:
                 arrays[f"outcome_{m}_{prefix}_{key}"] = np.asarray(getattr(sub, key))
@@ -262,10 +283,12 @@ def load_multi_npz(path: str | Path) -> LongBetMulti:
     # Rebuild child traces in internal order
     child_traces = []
     for m in range(M):
+        key = f"outcome_{m}_trend_coef"
         tr = LongBetTrace(
             mu_trace=_rebuild_trace(data, f"outcome_{m}_mu", has_chains),
             nu_trace=_rebuild_trace(data, f"outcome_{m}_nu", has_chains),
             **{k: jnp.asarray(data[f"outcome_{m}_{k}"]) for k in _PARAM_KEYS},
+            trend_coef=jnp.asarray(data[key]) if key in data.files else None,
             cutpoints=(jnp.asarray(data[f"outcome_{m}_cutpoints"])
                        if meta["internal_outcomes"][m] == "ordinal" else None),
         )
@@ -301,6 +324,10 @@ def load_multi_npz(path: str | Path) -> LongBetMulti:
     model.provenance = str(meta.get("provenance", ""))
     model.sampler_semantics = str(meta["sampler_semantics"])
     model.rng_scheme_version = int(meta.get("rng_scheme_version", 1))
+    # Symmetric with the saver: the scalar restorer writes exactly the three
+    # attributes LongBetMulti shares with LongBet, and tolerates a missing key
+    # by clearing them.
+    LongBet._trend_basis_from_dict(model, meta.get("trend_basis"))
 
     # Reconstitute child LongBet fits in user order
     child_fits = []
@@ -322,6 +349,11 @@ def load_multi_npz(path: str | Path) -> LongBetMulti:
         child_model.S_max_ = model.S_max_
         child_model.t_fit_ = model.fitted_t_
         child_model.fitted_t_ = model.fitted_t_
+        # Same sharing as LongBetMulti.fit: a reloaded child must predict with
+        # the basis its coefficients were sampled against.
+        child_model.trend_time_basis_ = model.trend_time_basis_
+        child_model.trend_period_basis_ = model.trend_period_basis_
+        child_model.trend_feature_spec_ = model.trend_feature_spec_
 
         child_fits.append(child_model)
 

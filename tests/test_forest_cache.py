@@ -36,6 +36,7 @@ def _constant_state(y, observed, variance=1.0, **overrides):
         max_depth_pr=1, max_depth_trt=1,
         min_points_per_leaf_pr=1, min_points_per_leaf_trt=1,
         sample_beta=False, random_intercept=False,
+        use_inter_ensemble_move=False, use_trend_block=False,
         standardize=False, num_chains=1,
     )
     cfg = dataclasses.replace(cfg, **overrides)

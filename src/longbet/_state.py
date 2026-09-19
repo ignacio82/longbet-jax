@@ -55,6 +55,7 @@ from bartz.mcmcstep._axes import CHAIN_AXIS
 from longbet._config import LongBetConfig
 from longbet._gp import build_kernel_matrix, kernel_cholesky
 from longbet._ordinal import full_cutpoints, prepare_ordinal, sample_ordinal_latents
+from longbet._trend_basis import init_horseshoe, trend_prior_scales
 from longbet._x64 import enable_x64
 
 #: Which leaves carry a chain axis is **not** hardcoded here.  ``bartz``
@@ -121,6 +122,15 @@ class LongBetState(State):
     mu_fit: Float32[Array, '*chains n'] = field(chains=CHAIN_AXIS, data=-1)
     nu_fit: Float32[Array, '*chains n'] = field(chains=CHAIN_AXIS, data=-1)
 
+    # --- smooth calendar-time trend block ------------------------------------
+    #: Row-wise Kronecker product ``phi(t) (x) b(X_i)``, shape ``(n, q_tot)``.
+    #: Built once from fixed bases and **shared** across chains -- that it does
+    #: not vary by chain is what makes the block cure the mismatch rather than
+    #: relocate it (see ``longbet._trend_basis``). ``q_tot = 0`` disables it.
+    trend_design: Float32[Array, 'n q_tot'] = field(data=-1)
+    #: Trend coefficients, per chain.
+    trend_coef: Float32[Array, '*chains q_tot'] = field(chains=CHAIN_AXIS)
+
     # --- GP kernel Cholesky factor over 0..S_max (shared, float32) -----------
     K_chol: Float32[Array, 'S_max_plus_1 S_max_plus_1'] = field()
 
@@ -141,7 +151,27 @@ class LongBetState(State):
     tempering_levels: int = field(static=True, default=1)
     tempering_beta_min: float = field(static=True, default=0.05)
     use_inter_ensemble_move: bool = field(static=True, default=True)
-    inter_ensemble_sd: float = field(static=True, default=0.05)
+    use_trend_block: bool = field(static=True, default=False)
+    #: Per-column prior standard deviation of ``trend_coef``, shape
+    #: ``(q_tot,)``. Shared across chains: it is a fixed feature of the prior,
+    #: not a sampled value. Under the horseshoe the interaction entries are the
+    #: *global* scale ``A``, and the sampled ``tau lambda_j`` replaces them.
+    trend_prior_scale_vec: Any = field(default=None)
+    #: How many leading columns of ``trend_design`` are the free common-time
+    #: factor. The horseshoe applies only past this point.
+    trend_num_period: int = field(static=True, default=0)
+    use_trend_horseshoe: bool = field(static=True, default=False)
+    #: ``A``, the half-Cauchy scale of the horseshoe's global ``tau``. Static: a
+    #: fixed hyperparameter, and :func:`longbet._trend_basis.sample_horseshoe`
+    #: needs it as a Python float, not a traced array.
+    trend_hs_global_scale: float = field(static=True, default=1.0)
+    #: ``lambda_j^2`` and its auxiliary ``nu_j``, per chain, one entry per
+    #: interaction column. Per chain because they are sampled.
+    trend_local2: Any = field(chains=CHAIN_AXIS, default=None)
+    trend_local_aux: Any = field(chains=CHAIN_AXIS, default=None)
+    #: ``tau^2`` and its auxiliary ``xi``, per chain, scalars.
+    trend_global2: Any = field(chains=CHAIN_AXIS, default=None)
+    trend_global_aux: Any = field(chains=CHAIN_AXIS, default=None)
 
     @property
     def is_tempered(self) -> bool:
@@ -306,10 +336,28 @@ def _overdisperse_chains(
     b0 = state.b0
     b1 = state.b1
 
+    # The smooth trend block is the quantity the diverging-trend designs
+    # disagree about, so it is dispersed too: chains that started it at a common
+    # zero would agree about it for a reason that has nothing to do with
+    # convergence. Like gamma it enters the fit, so the residual follows it.
+    if state.use_trend_block and state.trend_design.shape[1] > 0:
+        sigma_c = jnp.asarray(state.trend_prior_scale_vec, dtype=jnp.float32)
+        trend_coef = sigma_c[None, :] * jax.random.normal(
+            jax.random.fold_in(key, 9301),
+            (num_chains, state.trend_design.shape[1]),
+            jnp.float32,
+        )
+        resid = resid - jnp.where(
+            state.obs_mask, trend_coef @ state.trend_design.T, 0.0
+        )
+    else:
+        trend_coef = state.trend_coef
+
     state = eqx.tree_at(
-        lambda s: (s.beta, s.gamma, s.sigma2, s.sigma_gamma2, s.b0, s.b1, s.resid),
+        lambda s: (s.beta, s.gamma, s.sigma2, s.sigma_gamma2, s.b0, s.b1,
+                   s.trend_coef, s.resid),
         state,
-        (beta, gamma, sigma2, sigma_gamma2, b0, b1, resid),
+        (beta, gamma, sigma2, sigma_gamma2, b0, b1, trend_coef, resid),
     )
     if state.num_categories > 2:
         # Ordinal-only streams; preserve the five legacy initialization keys.
@@ -320,6 +368,7 @@ def _overdisperse_chains(
         gaps *= jnp.exp(.25 * jax.random.normal(gap_key, gaps.shape, jnp.float32))
         cutpoints = jnp.cumsum(gaps, axis=1)
         mean = (state.alpha[:, None] * state.mu_fit
+                + trend_coef @ state.trend_design.T
                 + jnp.where(state.z_vec == 1, b1[:, None], b0[:, None])
                 * beta[:, state.exposure_idx] * state.nu_fit
                 + gamma[:, state.unit_idx])
@@ -345,6 +394,8 @@ def init_longbet(
     max_split_nu: UInt[Array, ' p'],
     config: LongBetConfig,
     offset: float = 0.0,
+    trend_design: Float32[Array, 'n q_tot'] | None = None,
+    trend_num_period: int = 0,
     num_chains: int | None = None,
     chain_key: Any = None,
     mesh: Any = None,
@@ -371,6 +422,16 @@ def init_longbet(
         Additive offset handed to `bartz`. For a binary outcome this is the
         probit intercept ``Phi^-1(rate)``; for a standardized continuous outcome
         it is 0.
+    trend_design
+        Conjugate calendar-time design ``[ psi(t) | phi(t) (x) b(X_i) ]``, shape
+        ``(n, q_tot)``, from :func:`longbet._trend_basis.build_trend_design`.
+        ``None`` (or zero columns) disables the block. It is shared across
+        chains and never resampled.
+    trend_num_period
+        How many leading columns of ``trend_design`` are the free common-time
+        block. The prior shrinks those columns loosely and the remaining
+        interaction columns in proportion to their number, so getting this wrong
+        misprices the prior rather than breaking the sampler.
     num_chains
         Number of chains to replicate the parameter block into.
     chain_key
@@ -519,6 +580,50 @@ def init_longbet(
         .add(obs_mask.astype(jnp.float32))
     )
 
+    # Smooth calendar-time block. Zero columns is the disabled case and is kept
+    # as a real (n, 0) array rather than None so that every pytree operation --
+    # partition, vmap, trace -- sees the same structure either way.
+    if trend_design is None:
+        trend_design = jnp.zeros((n, 0), dtype=jnp.float32)
+    trend_design = jnp.asarray(trend_design, dtype=jnp.float32)
+    if trend_design.shape[0] != n:
+        raise ValueError(
+            f"trend_design has {trend_design.shape[0]} rows, expected {n}"
+        )
+    # A masked cell contributes nothing to any conditional; zeroing its row here
+    # means the block's sufficient statistics never have to re-apply the mask.
+    trend_design = jnp.where(obs_mask[:, None], trend_design, 0.0)
+    q_tot = int(trend_design.shape[1])
+    use_trend_block = bool(config.use_trend_block) and q_tot > 0
+    # The design is laid out as [ period contrasts | time x feature ], so the
+    # prior splits at trend_num_period. The two halves are shrunk differently:
+    # see trend_prior_scales.
+    n_period = min(int(trend_num_period), q_tot)
+    n_inter = q_tot - n_period
+    if q_tot:
+        trend_prior_scale_vec = jnp.asarray(
+            trend_prior_scales(
+                n_period,
+                n_inter,
+                config.trend_prior_scale,
+                config.trend_period_scale,
+            ),
+            dtype=jnp.float32,
+        )
+    else:
+        trend_prior_scale_vec = jnp.zeros((0,), dtype=jnp.float32)
+    use_trend_horseshoe = (
+        bool(config.trend_horseshoe) and use_trend_block and n_inter > 0
+    )
+    # Started at the ridge, so the horseshoe has to earn any departure from it
+    # out of the data rather than out of its initialization.
+    hs_global_scale = float(config.trend_prior_scale) / max(n_inter, 1) ** 0.5
+    hs_init = init_horseshoe(n_inter, hs_global_scale)
+    trend_local2 = jnp.asarray(hs_init["local2"], dtype=jnp.float32)
+    trend_local_aux = jnp.asarray(hs_init["local_aux"], dtype=jnp.float32)
+    trend_global2 = jnp.asarray(hs_init["global2"], dtype=jnp.float32)
+    trend_global_aux = jnp.asarray(hs_init["global_aux"], dtype=jnp.float32)
+
     # The initial full-model residual is whatever bartz's own init left on the
     # prognostic view, read back into data units. For a standardized continuous
     # outcome that is y - offset; for a binary outcome the latent z starts at
@@ -574,6 +679,8 @@ def init_longbet(
         # conditional must scale the same prognostic mean as the likelihood.
         mu_fit=jnp.full(n, offset, dtype=jnp.float32),
         nu_fit=jnp.zeros(n, dtype=jnp.float32),
+        trend_design=trend_design,
+        trend_coef=jnp.zeros(q_tot, dtype=jnp.float32),
         K_chol=K_chol,
         resid_eff_scale_nu=state_nu.resid_eff_scale,
         resid_inexact_integral_nu=state_nu.resid_inexact_integral,
@@ -583,7 +690,15 @@ def init_longbet(
         tempering_levels=int(config.tempering_levels),
         tempering_beta_min=float(config.tempering_beta_min),
         use_inter_ensemble_move=bool(config.use_inter_ensemble_move),
-        inter_ensemble_sd=float(config.inter_ensemble_sd),
+        use_trend_block=use_trend_block,
+        trend_prior_scale_vec=trend_prior_scale_vec,
+        trend_num_period=n_period,
+        use_trend_horseshoe=use_trend_horseshoe,
+        trend_hs_global_scale=hs_global_scale,
+        trend_local2=trend_local2,
+        trend_local_aux=trend_local_aux,
+        trend_global2=trend_global2,
+        trend_global_aux=trend_global_aux,
         gamma_prior_a=config.gamma_prior_a,
         gamma_prior_b=config.gamma_prior_b,
         sigma_prior_a=config.sigma_prior_a,

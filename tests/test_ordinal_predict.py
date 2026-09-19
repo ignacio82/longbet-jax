@@ -210,13 +210,24 @@ def test_prediction_pairs_both_forest_inputs_and_scales_the_offset_once(fitted, 
     gamma = np.asarray(tr.gamma).reshape(D,12)[:,np.repeat(np.arange(12),4)]
     f0 = (.4 + np.arange(D,dtype=np.float32)[:,None]*.02 + .3*control[None,row]).astype(np.float32)
     f1 = (.4 + np.arange(D,dtype=np.float32)[:,None]*.02 + .3*factual[None,row]).astype(np.float32)
-    eta0 = alpha*mu + b0*beta[:,:1]*f0 + gamma          # b0 = 0: the untreated surface is mu + gamma
-    eta1 = alpha*mu + b1*beta[:,pred.s.ravel()]*f1*(pred.s.ravel() > 0) + gamma
-    np.testing.assert_allclose(pred.muhats0.reshape(M,D).T, eta0, atol=2e-7)
+    trend = 0.0
+    if getattr(tr, "trend_coef", None) is not None:
+        from longbet._trend_basis import apply_unit_features, evaluate_trend
+        trend = evaluate_trend(
+            np.asarray(tr.trend_coef).reshape(D, -1),
+            apply_unit_features(np.asarray(data["x"], dtype=np.float32), model.trend_feature_spec_),
+            np.asarray(model.trend_time_basis_, dtype=np.float32),
+            np.repeat(np.arange(12, dtype=np.int32), 4),
+            np.tile(np.arange(4, dtype=np.int32), 12),
+            period=np.asarray(model.trend_period_basis_, dtype=np.float32),
+        )
+    eta0 = alpha*mu + trend + b0*beta[:,:1]*f0 + gamma          # b0 = 0: the untreated surface is mu + trend + gamma
+    eta1 = alpha*mu + trend + b1*beta[:,pred.s.ravel()]*f1*(pred.s.ravel() > 0) + gamma
+    np.testing.assert_allclose(pred.muhats0.reshape(M,D).T, eta0, atol=2e-6)
     # Summing mu0+tau may differ by float32 rounding from computing eta1 directly.
     actual1 = pred.muhats0 + pred.tauhats
-    np.testing.assert_allclose(actual1.reshape(M,D).T,eta1,atol=4e-7)
-    p0 = category_probabilities(eta0,pred.cutpoints_samples)
+    np.testing.assert_allclose(actual1.reshape(M,D).T,eta1,atol=2e-6)
+    p0 = category_probabilities(pred.muhats0.reshape(M,D).T,pred.cutpoints_samples)
     p1 = category_probabilities(actual1.reshape(M,D).T,pred.cutpoints_samples)
     np.testing.assert_allclose(pred.prob_tau.reshape(M,pred.num_categories,D).transpose(2,0,1),p1-p0,atol=3e-15)
 

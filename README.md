@@ -11,59 +11,78 @@ For unit $i$ in period $t$ with exposure $S_{it}$, the number of periods since
 the unit's (absorbing) treatment started and $0$ before it,
 
 $$
-Y_{it} = \mu(X_i, t, X^{\mathrm{tv}}_{it})
-       + \beta_{S_{it}}\, \nu(X_i, t, X^{\mathrm{trt,tv}}_{it})\, \mathbf{1}\{S_{it} \ge 1\}
+Y_{it} = \mu(X_i, X^{\mathrm{tv}}_{it}) + \eta_{it}
+       + \beta_{S_{it}}\, \nu(X_i, X^{\mathrm{trt,tv}}_{it})\, \mathbf{1}\{S_{it} \ge 1\}
        + \gamma_i + \epsilon_{it},
 \qquad \epsilon_{it} \sim \mathcal{N}(0, \sigma^2).
 $$
 
-- $\mu$ is a prognostic sum of trees over baseline covariates, calendar time and
-  optional time-varying covariates; $\nu$ is a treatment sum of trees over
-  baseline covariates, optional time-varying covariates and, if allowed,
-  calendar time. Each tree has the BART prior: a node at depth $d$ splits with
-  probability $\alpha/(1+d)^{\beta}$ ($0.95/(1+d)^2$ prognostic, $0.25/(1+d)^3$
-  treatment) and leaf values are $\mathcal{N}(0, \tau^2)$ with
-  $\tau = 3/(2\sqrt{m_\mu})$ and $3/(3\sqrt{m_\nu})$ for $m$ trees on the
-  standardized response.
-- $\beta_S$ is a Gaussian process over the exposure clock,
+- **Prognostic and treatment forests ($\mu, \nu$).** $\mu$ is a prognostic sum of
+  trees over baseline covariates $X_i$ and optional time-varying covariates
+  $X^{\mathrm{tv}}_{it}$; $\nu$ is a treatment sum of trees over baseline
+  covariates $X_i$ (or a separate moderation matrix `x_trt`) and optional
+  time-varying covariates $X^{\mathrm{trt,tv}}_{it}$. Each tree has the BART
+  prior: a node at depth $d$ splits with probability $\alpha/(1+d)^{\beta}$
+  ($0.95/(1+d)^2$ prognostic, $0.25/(1+d)^3$ treatment) and leaf values are
+  $\mathcal{N}(0, \tau^2)$ with $\tau = 3/(2\sqrt{m_\mu})$ and
+  $3/(3\sqrt{m_\nu})$ for $m$ trees on the standardized response.
+- **Conjugate calendar-time block ($\eta_{it}$, `use_trend_block = True`).**
+  Within every adoption cohort $g_i$, calendar time $t$, unit identity $i$, and
+  exposure duration $S_{it} = t - g_i + 1$ are exactly collinear. Letting BART
+  trees split on $t$ forces local grow/prune steps to negotiate that ridge
+  against $(\gamma_i, \beta_S)$, trapping chains in distinct tree topologies.
+  By default (`split_calendar_mu = False`, `split_calendar_trt = False`), neither
+  forest splits on $t$; instead, smooth covariate-dependent calendar trends and
+  common period shocks are carried by the conjugate basis block
+  $$
+  \eta_{it} = \Phi^{\mathrm{time}}_t c_0 + \sum_{k=1}^{d} \phi_k(t)\, b(X_i)^\top c_k,
+  $$
+  where $\Phi^{\mathrm{time}} \in \mathbb{R}^{T \times p_t}$
+  ($p_t = \min(T - 1, 8)$, `trend_period_effects = True`, prior scale
+  `trend_period_scale = 2.0`) is a zero-sum Discrete Cosine Transform (DCT-II)
+  period basis, $\phi(t) \in \mathbb{R}^d$ ($d = 2$, `trend_degree = 2`) is an
+  orthonormal polynomial basis in normalized calendar time, and
+  $b(X_i) \in \mathbb{R}^{1 + p + F}$ combines an intercept, standardized linear
+  covariates, and $F = 64$ random Fourier features (`trend_num_features = 64`,
+  prior scale `trend_prior_scale = 2.0`, optional regularized horseshoe via
+  `trend_horseshoe = True`). Crucially, the coefficient vector $c = (c_0, c_1, \dots, c_d)$
+  is drawn **jointly in a single conjugate Gaussian block Gibbs step** with the
+  unit intercepts $\gamma_i$ and the exposure trajectory $\beta_S$, eliminating
+  the unit--period--exposure collinearity in one orthogonal projection.
+- **Exposure trajectory ($\beta_S$).** $\beta_S$ is a Gaussian process over the
+  exposure clock,
   $\beta \sim \mathcal{N}\!\big(0,\, K + \sigma_m^2 \mathbf{1}\mathbf{1}^\top\big)$,
   with a squared-exponential (default), Matérn-3/2, Matérn-5/2 or AR(1) kernel
   $K$ of marginal variance $\sigma_k^2$ and lengthscale $\lambda$, and a constant
   mean marginalized into the kernel so projections beyond the fitted horizon
   revert to the estimated common level. By default the treatment forest does
-  not split on $S$: the trajectory carries the whole exposure profile, which
-  keeps the product $\beta_S\nu$ identified. `split_exposure_trt = TRUE` lets
-  it split on $S$ as well, for panels whose units need genuinely different
-  shapes over exposure; read the diagnostics, because that freedom is a ridge
-  between the trajectory and the forest.
-- $\gamma_i \sim \mathcal{N}(0, \sigma_\gamma^2)$ is a unit random intercept,
+  not split on $S$ (`split_exposure_trt = False`): the trajectory carries the
+  whole exposure profile, which keeps the product $\beta_S\nu$ identified.
+- **Random intercepts and variances.** $\gamma_i \sim \mathcal{N}(0, \sigma_\gamma^2)$
+  is a unit random intercept (`random_intercept = True`),
   $\sigma^2 \sim \mathrm{IG}(2, 1)$ on the standardized scale and
   $\sigma_\gamma^2 \sim \mathrm{IG}(1, 0.1)$.
-- Binary outcomes: $Y_{it} = \mathbf{1}\{Y^*_{it} > 0\}$ with the same mean for
-  the latent $Y^*_{it}$ and unit innovation variance (probit). Ordinal outcomes
-  with $K$ categories: $Y_{it} = k \iff c_{k-1} < Y^*_{it} \le c_k$ with ordered
-  cutpoints under an ordered-normal prior, updated by a marginalized
-  Metropolis move.
+- **Binary and ordinal outcomes.** Binary outcomes:
+  $Y_{it} = \mathbf{1}\{Y^*_{it} > 0\}$ with the same mean surface (including
+  $\eta_{it}$) for the latent $Y^*_{it}$ and unit innovation variance (probit).
+  Ordinal outcomes with $K$ categories:
+  $Y_{it} = k \iff c_{k-1} < Y^*_{it} \le c_k$ with ordered cutpoints under an
+  ordered-normal prior, updated by a marginalized Metropolis move.
 
 The reported effect is the contrast between being $S$ periods into treatment
-and not being treated at all, $\tau_t(X_i, S) = \beta_S\,\nu(X_i, t)$, and the
-ATT by exposure averages it over the treated cells at that exposure. Missing
-cells (`NaN`) are marginalized, not imputed. Every sweep updates both forests
-with GROW, PRUNE, CHANGE (a new rule at a leaf parent, or at any internal
-node with its subtree kept) and one data-driven REGROW proposal, then $\beta$,
-$\gamma$ and the variances, a Metropolis move along the exact scale ridge
+and not being treated at all, $\tau_t(X_i, S) = \beta_S\,\nu(X_i)$ (since
+$\mu(X_i) + \eta_{it} + \gamma_i$ cancels between treated and untreated potential
+outcomes), and the ATT by exposure averages it over the treated cells at that
+exposure. Missing cells (`NaN`) are marginalized, not imputed. Every sweep
+updates both forests with GROW, PRUNE, CHANGE (a new rule at a leaf parent, or
+at any internal node with its subtree kept) and one data-driven REGROW proposal,
+then draws $(\gamma, \beta, c)$ jointly via the bordered Woodbury solver and
+updates the variances, followed by a Metropolis move along the exact scale ridge
 between $\beta$ and the treatment leaves, and a two-stage conjugate Gaussian
-subspace Gibbs move along the inter-ensemble trend ridge between $(\mu, \gamma)$
-and $(\beta, \nu)$ (`use_inter_ensemble_move = True`). Chains start from the
-prior, so $\hat R$ measures convergence; `tempering_levels = K` runs each chain
-as a parallel-tempering ladder for posteriors whose forest modes the local moves
-connect too slowly. In addition to bulk/tail ESS, rank $\hat R$ and MCSE per
-exposure, `pred.stability()` reports concurrent untreated control support per
-exposure (`mean_concurrent_controls`, `min_concurrent_controls`,
-`pct_zero_control_cells`) and `model.untreated_counts_per_t_` tracks untreated
-units per calendar period. Defaults: 4 chains, 2,000 burn-in and 1,000 retained
-sweeps (`n_skip = 1` thinning interval), 20 prognostic and 60 treatment trees of
-depth at most 8.
+subspace Gibbs move along the inter-ensemble ridge between $(\mu, \gamma)$ and
+$(\beta, \nu)$ (`use_inter_ensemble_move = True`). Defaults: 4 chains, 2,000
+burn-in and 1,000 retained sweeps (`n_skip = 1`), 20 prognostic and 60 treatment
+trees of depth at most 8.
 
 ### Python
 
@@ -111,13 +130,15 @@ saveRDS(fit, "fit.rds"); fit <- readRDS("fit.rds")
 
 ### The model
 
-Outcomes $m = 1, \dots, M$ share the panel, the covariates and the treatment
-schedule. Each has its own forests, trajectory and unit intercept, and the
-within-period innovations are coupled through a triangular seemingly unrelated
-regression (SUR):
+Outcomes $m = 1, \dots, M$ share the panel, the covariates, the treatment
+schedule, and the calendar-time basis $\Phi$. Each has its own forests,
+calendar-time trend coefficients $c^{(m)}$, exposure trajectory $\beta^{(m)}$,
+and unit intercept $\gamma^{(m)}$, and the within-period innovations are coupled
+through a triangular seemingly unrelated regression (SUR):
 
 $$
-Y^{(m)}_{it} = \mu_m(X_i, t) + \beta^{(m)}_{S_{it}}\, \nu_m(X_i, t)\, \mathbf{1}\{S_{it} \ge 1\}
+Y^{(m)}_{it} = \mu_m(X_i) + \eta^{(m)}_{it}
+             + \beta^{(m)}_{S_{it}}\, \nu_m(X_i)\, \mathbf{1}\{S_{it} \ge 1\}
              + \gamma^{(m)}_i + \sum_{j < m} \Gamma_{mj}\, \tilde R^{(j)}_{it} + \epsilon^{(m)}_{it},
 \qquad \epsilon^{(m)}_{it} \sim \mathcal{N}(0, \sigma_m^2),
 $$
@@ -126,11 +147,12 @@ where $\tilde R^{(j)}_{it}$ is outcome $j$'s response minus its own mean surface
 (its latent response for a binary or ordinal outcome). Binary and ordinal
 outcomes are placed first with zero incoming loadings and unit latent variance;
 the loadings $\Gamma_{mj}$ have a $\mathcal{N}(0, \sigma_\Gamma^2)$ prior. Every
-mean, latent and coefficient update conditions on the full SUR precision, so
-later outcomes inform earlier means. Draws are aligned across outcomes, which is
-what makes joint event probabilities such as $\Pr(\tau^{(1)} > 0,\ \tau^{(2)} < 0)$
-computable from the same posterior; effect draws for binary outcomes are
-probability differences $\Phi(\mu_0 + \tau) - \Phi(\mu_0)$.
+mean, latent, trend block $c^{(m)}$ and coefficient update conditions on the
+full SUR precision, so later outcomes inform earlier means. Draws are aligned
+across outcomes, which makes joint event probabilities such as
+$\Pr(\tau^{(1)} > 0,\ \tau^{(2)} < 0)$ computable from the same posterior;
+effect draws for binary outcomes are probability differences
+$\Phi(\mu_0 + \tau) - \Phi(\mu_0)$.
 
 ### Python
 
@@ -171,13 +193,14 @@ saveRDS(fit, "multi.rds"); fit <- readRDS("multi.rds")
 
 A single randomized encouragement wave $Z_{it}$ (offered from a launch period
 onward, permanent control arm) and an absorbing adoption indicator $D_{it}$ are
-observed. Two LongBet equations are fitted and composed.
+observed. Two LongBet equations (both equipped with the conjugate calendar-time
+block $\eta_{it}$) are fitted and composed.
 
 **Outcome on the adoption clock.** With $S^D_{it}$ the periods since unit $i$
 adopted (0 before adoption),
 
 $$
-Y_{it} = \mu_Y(X_i, t) + \beta^Y_{S^D_{it}}\, \nu_Y(X_i, t)\, \mathbf{1}\{S^D_{it} \ge 1\}
+Y_{it} = \mu_Y(X_i) + \eta^Y_{it} + \beta^Y_{S^D_{it}}\, \nu_Y(X_i)\, \mathbf{1}\{S^D_{it} \ge 1\}
        + \gamma^Y_i + \epsilon^Y_{it}.
 $$
 
@@ -192,7 +215,7 @@ on the at-risk set $\{D_{i,t-1} = 0\}$ is
 
 $$
 \lambda_{it} = \Pr(D_{it} = 1 \mid D_{i,t-1} = 0)
-= \Phi\!\Big(\mu_D(X_i, t) + \beta^D_{S^Z_{it}}\, \nu_D(X_i, t)\, \mathbf{1}\{S^Z_{it} \ge 1\} + \eta_i\Big),
+= \Phi\!\Big(\mu_D(X_i) + \eta^D_{it} + \beta^D_{S^Z_{it}}\, \nu_D(X_i)\, \mathbf{1}\{S^Z_{it} \ge 1\} + \eta_i\Big),
 $$
 
 a binary LongBet fitted to the first-adoption indicator with the cells after
@@ -203,7 +226,7 @@ is a frailty.
 probability of adopting first in period $a$,
 $\pi_a(x, z) = \lambda_a \prod_{s < a}(1 - \lambda_s)$, and of having adopted
 by $t$, $P_t(x, z) = 1 - \prod_{s \le t}(1 - \lambda_s)$; the outcome equation
-gives the response $\tau_t(x, s) = \beta^Y_s \nu_Y(x, t)$ to having adopted $s$
+gives the response $\tau_t(x, s) = \beta^Y_s \nu_Y(x)$ to having adopted $s$
 periods ago. The offer's effects are
 
 $$
@@ -229,11 +252,7 @@ tail ESS and rank $\hat R$ on every reported quantity. `predict_conditional()`
 describes a unit with a given covariate profile drawn from the fitted population
 (both intercepts integrated out), for study units and new cohorts alike, and
 carries the decision quantities: cumulative lift, breakeven probability, and a
-knapsack allocation under cost, capacity and budget. The model uses the
-exclusion restriction and assumes that, given covariates and the unit
-intercept, adoption timing is not confounded with the outcome innovations; the
-design-based reference needs neither and is the check on the population offer
-effects.
+knapsack allocation under cost, capacity and budget.
 
 ### Python
 
@@ -272,3 +291,48 @@ cond$strata; cond$breakeven_prob; cond$decision
 principal_strata(cond); knapsack_policy(cond, cost = 20, capacity = 80)
 saveRDS(fit, "encouragement.rds"); fit <- readRDS("encouragement.rds")
 ```
+
+## 4. Practitioner's Guide & Diagnostic Workflow for Real Data
+
+The shipped defaults (`use_trend_block = True`, `trend_degree = 2`,
+`trend_num_features = 64`, `trend_prior_scale = 2.0`, `trend_period_effects = True`,
+`trend_period_scale = 2.0`, `trend_horseshoe = False`, `split_calendar_mu = False`,
+`split_calendar_trt = False`, `split_exposure_trt = False`,
+`use_inter_ensemble_move = True`) are calibrated so that standard staggered-adoption
+panels mix reliably ($\widehat{R}_{\max} \le 1.05$, $\mathrm{ESS}_{\min} > 200$)
+without manual tuning—even when untreated trends diverge nonlinearly across
+covariates.
+
+### Step 1: Always run `pred.stability()` (`att_stability(pred)` in R)
+
+After fitting on a real dataset, inspect both the summary and per-exposure rows
+of `diag = pred.stability()`:
+
+1. **Check concurrent control and cohort support first (`n_treated`, `mean_concurrent_controls`, `pct_zero_control_cells`).**
+   In staggered adoption panels, the longest exposures $s$ are observed only for
+   the earliest-adopting cohort in the final periods of the panel. If
+   `n_treated[s - 1]` is very small (e.g. $< 15$ units) or
+   `pct_zero_control_cells` is near $1.0$ (almost all units are already treated
+   in those calendar periods), any counterfactual comparison at exposure $s$
+   relies on extrapolation. If $\widehat{R}_s \le 1.05$ on well-supported early
+   exposures ($s = 1, \dots, S^*$) and only degrades at the tail where
+   `n_treated` is tiny, **do not enable tree splits on time**—simply report
+   exposures up to the supported horizon $S^*$ (or inspect the credible
+   intervals, which widen automatically to reflect extrapolation uncertainty).
+2. **Check global chain agreement (`rhat_max`, `ess_min`).**
+   If $\widehat{R}_s > 1.05$ or $\mathrm{ESS}_s < 100$ even at well-supported
+   exposures ($s = 1, 2, 3$ with ample `n_treated` and `mean_concurrent_controls`),
+   use the decision table below to adjust the model or sampler configuration.
+
+### Step 2: When to keep the defaults vs. adjust options
+
+| Empirical setting / diagnostic symptom | Recommended configuration | Why |
+|---|---|---|
+| **Standard staggered panel** ($N \ge 100$, $T \in [4, 24]$, $p \le 30$) with parallel or diverging trends | **Keep all defaults** | The DCT period basis + degree-2 polynomial $\times$ 64 RFF block absorbs common period shocks and smooth $X_i \times t$ confounding while keeping $\mu$ and $\nu$ orthogonal to calendar time. |
+| **High-dimensional baseline covariates** ($p > 30$) where only a few covariates drive differential trends | `trend_horseshoe=True` (optionally `trend_num_features=32`) | Replaces the isotropic ridge prior on the $(1 + p + F)d$ trend interactions with a regularized Carvalho--Polson--Scott horseshoe prior (`trend_horseshoe_tau0=0.1`), shrinking irrelevant covariate-by-time slopes toward zero. |
+| **Long panels ($T \ge 25$)** with multi-inflection unit trends | `trend_degree=3` | Adds cubic Legendre time polynomials $\phi_3(t)\,b(X_i)$. Avoid `trend_degree=3` on short panels ($T \le 12$), where cubic cohort-by-covariate slopes are weakly identified. |
+| **Sharp discontinuous calendar regime shifts** that affect only a subset of covariate profiles (e.g. a policy shock hitting one industry in period $t_0$) | Pass a time-varying indicator in `x_tv` (preferred), or set `split_calendar_mu=True` | Passing known regime indicators in `x_tv` lets $\mu$ split on them without opening the full calendar clock $t$. Only set `split_calendar_mu=True` if the timing of the interaction shock is unknown, and monitor `pred.stability()`. |
+| **Abrupt or step-change treatment dynamics** over exposure $S$ (rather than smooth build-up/decay) | `kernel_type="matern32"` (or `"ar1"`), `lambda_knl=1.0` | The default squared-exponential GP (`lambda_knl=2.0`) favors smooth trajectories; Matérn-3/2 or AR(1) with a shorter lengthscale allows sharper kinks between $S=1$ and $S=2$. |
+| **Long-horizon forecasting** beyond observed exposure ($S_{\mathrm{pred}} > S_{\max}$) | Sweep `sig_knl` and `lambda_knl` in `model.predict(..., cache_forest_evaluations=True)` | Audits how much out-of-window forecasts depend on the GP extrapolation prior while holding the in-sample posterior draws fixed and avoiding refitting. |
+| **No unit-level serial correlation** (or repeated cross-sections where row index $i$ is not a persistent unit) | `random_intercept=False` | Drops $\gamma_i$ when units are observed only once or residual correlation is negligible. |
+| **Residual forest multimodality** ($\widehat{R} > 1.05$ across early exposures $s=1,2$) | `num_burnin=3000, num_sweeps=1500` or `tempering_levels=4` | Increases the MCMC budget or couples a 4-rung replica-exchange ladder per chain to bridge separated BART partitions. |

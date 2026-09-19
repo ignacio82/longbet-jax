@@ -146,6 +146,8 @@ def init_multi_longbet(
     max_split_nu: UInt[Array, ' p'],
     norm_input: NormalizedMultiInput,
     config: LongBetConfig,
+    trend_design: Float32[Array, 'n q_tot'] | None = None,
+    trend_num_period: int = 0,
     num_chains: int | None = None,
     init_key: Any = None,
     mesh: Any = None,
@@ -155,6 +157,20 @@ def init_multi_longbet(
 
     Shares the unified design matrix X, panel index vectors, and split bounds
     across all M outcome equations.
+
+    ``trend_design`` is the calendar-time block of
+    :func:`longbet._trend_basis.build_trend_design`. It depends only on ``(x,
+    t)``, which every equation shares, so the *same* array is handed to all M
+    children -- exactly as the scalar fit hands one array to its single
+    equation. Each child then masks it to its own observed cells inside
+    :func:`longbet._state.init_longbet`, which is what makes an outcome with
+    missing cells behave like the scalar fit on that same outcome.
+
+    Passing it is not optional in practice. With the shipped defaults
+    :attr:`longbet.LongBetConfig.split_calendar_mu` resolves to ``False``, so
+    the prognostic forest cannot split on calendar time; if the block were not
+    wired in as well, nothing in the model could represent a calendar-time
+    movement at all.
     """
     M = norm_input.M
     continuous_mask = tuple(t == "continuous" for t in norm_input.internal_outcomes)
@@ -180,6 +196,8 @@ def init_multi_longbet(
             max_split_nu=max_split_nu,
             config=child_cfg,
             offset=offset_m,
+            trend_design=trend_design,
+            trend_num_period=trend_num_period,
             num_chains=None,
             chain_key=(jax.random.fold_in(init_key, m)
                        if init_key is not None and (num_chains is None or num_chains <= 1) else None),

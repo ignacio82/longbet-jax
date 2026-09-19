@@ -55,7 +55,8 @@ def _interaction_state(seed=7, N=80, T=6, P=3, **cfg):
     z_vec = (exposure > 0) & np.repeat(np.arange(N) < N // 2, T)
     exposure = np.where(z_vec, exposure, 0).astype(np.int32)
     options = dict(num_trees_pr=2, num_trees_trt=2, min_points_per_leaf_pr=3, min_points_per_leaf_trt=3,
-                   sigma_prior_a=3.0, sigma_prior_b=1.0)
+                   sigma_prior_a=3.0, sigma_prior_b=1.0,
+                   use_inter_ensemble_move=False, use_trend_block=False)
     options.update(cfg)
     config = LongBetConfig(**options)
     X = rng.integers(0, 21, (P, M)).astype(np.uint8)

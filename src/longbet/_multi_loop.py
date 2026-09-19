@@ -93,6 +93,7 @@ class _MultiMCMCCarry(eqx.Module):
     alpha_traces: tuple[Float32[Array, '...'], ...]
     sigma2_traces: tuple[Float32[Array, '...'], ...]
     sigma_gamma2_traces: tuple[Float32[Array, '...'], ...]
+    trend_coef_traces: tuple[Float32[Array, '...'], ...]
     cutpoint_traces: tuple[Float32[Array, '...'] | None, ...]
     gamma_loadings_trace: Float32[Array, '...']
     swap_accepts: Float32[Array, '...'] | None
@@ -151,6 +152,65 @@ def _run_multi_longbet_mcmc(
     chains = cold_init.gamma_loadings.shape[:-2]
     sample_axis = 1 if chains else 0
 
+    coupled = state.sur_active and any(state.continuous_mask[1:])
+    if not coupled and not tempered and callback is None:
+        from longbet import _loop
+        from longbet._state import split_chain_fields
+        from longbet._step import longbet_single_step
+
+        final_states = []
+        main_traces = []
+        burnin_traces = []
+        orig_step = _loop.longbet_step
+        try:
+            for m in range(M):
+                child = state.states[m]
+
+                def _outcome_step(k, st, _m=m):
+                    k_outcome = random.fold_in(k, 0)
+                    if not st.has_chain_axis:
+                        return longbet_single_step(random.fold_in(k_outcome, _m), st)
+                    keys = random.split(k_outcome, st.num_chains)
+                    per, shared = split_chain_fields(st)
+
+                    def _one(ck, p):
+                        updated = longbet_single_step(
+                            random.fold_in(ck, _m), eqx.combine(p, shared)
+                        )
+                        return split_chain_fields(updated)[0]
+
+                    return eqx.combine(jax.vmap(_one)(keys, per), shared)
+
+                _loop.longbet_step = _outcome_step
+                res_m = _loop.run_longbet_mcmc(
+                    key=key,
+                    state=child,
+                    n_burn=n_burn_i,
+                    n_save=n_save_i,
+                    n_skip=n_skip_i,
+                    inner_loop_length=inner_loop_length,
+                )
+                final_states.append(res_m.final_state)
+                main_traces.append(res_m.main_trace)
+                burnin_traces.append(res_m.burnin_trace)
+        finally:
+            _loop.longbet_step = orig_step
+
+        final_multi = eqx.tree_at(lambda s: s.states, state, tuple(final_states))
+        return RunMultiLongBetResult(
+            final_state=final_multi,
+            main_trace=MultiLongBetTrace(
+                traces=tuple(main_traces),
+                gamma_loadings=jnp.zeros((*chains, n_save_i, M, M), jnp.float32),
+            ),
+            burnin_trace=(
+                MultiLongBetBurninTrace(traces=tuple(burnin_traces))
+                if n_burn_i > 0
+                else None
+            ),
+            swap_accepts=None,
+        )
+
     # Preallocate traces for each equation
     mu_burnins = []
     nu_burnins = []
@@ -163,6 +223,7 @@ def _run_multi_longbet_mcmc(
     alpha_traces = []
     sigma2_traces = []
     sigma_gamma2_traces = []
+    trend_coef_traces = []
     cutpoint_traces = []
 
     for m in range(M):
@@ -183,6 +244,13 @@ def _run_multi_longbet_mcmc(
         alpha_traces.append(jnp.zeros((*chains, n_save_i), jnp.float32))
         sigma2_traces.append(jnp.zeros((*chains, n_save_i), jnp.float32))
         sigma_gamma2_traces.append(jnp.zeros((*chains, n_save_i), jnp.float32))
+        # Calendar-time trend coefficients, exactly as ``longbet._loop`` stores
+        # them for the scalar model. When the block is off ``q_tot`` is zero and
+        # this is a zero-width array rather than ``None``, so predict(),
+        # save/load and the diagnostics need no multi-specific special case.
+        trend_coef_traces.append(
+            jnp.zeros((*chains, n_save_i, child.trend_design.shape[1]), jnp.float32)
+        )
         cutpoint_traces.append(jnp.zeros((*chains, n_save_i, child.num_categories - 2), jnp.float32)
                                if child.outcome_type_str == "ordinal" else None)
 
@@ -203,6 +271,7 @@ def _run_multi_longbet_mcmc(
         alpha_traces=tuple(alpha_traces),
         sigma2_traces=tuple(sigma2_traces),
         sigma_gamma2_traces=tuple(sigma_gamma2_traces),
+        trend_coef_traces=tuple(trend_coef_traces),
         cutpoint_traces=tuple(cutpoint_traces),
         gamma_loadings_trace=gamma_loadings_trace,
         swap_accepts=jnp.zeros((state.num_chains,), jnp.float32) if tempered else None,
@@ -247,6 +316,7 @@ def _run_multi_longbet_mcmc(
             new_alpha_traces = []
             new_sigma2_traces = []
             new_sigma_gamma2_traces = []
+            new_trend_coef_traces = []
             new_cutpoint_traces = []
 
             for m_idx in range(M):
@@ -293,6 +363,14 @@ def _run_multi_longbet_mcmc(
                         sample_axis,
                     )
                 )
+                new_trend_coef_traces.append(
+                    _set_param(
+                        carry_in.trend_coef_traces[m_idx],
+                        main_idx,
+                        child_st.trend_coef,
+                        sample_axis,
+                    )
+                )
 
             new_gamma_loadings_trace = _set_param(
                 carry_in.gamma_loadings_trace,
@@ -316,6 +394,7 @@ def _run_multi_longbet_mcmc(
                 alpha_traces=tuple(new_alpha_traces),
                 sigma2_traces=tuple(new_sigma2_traces),
                 sigma_gamma2_traces=tuple(new_sigma_gamma2_traces),
+                trend_coef_traces=tuple(new_trend_coef_traces),
                 cutpoint_traces=tuple(new_cutpoint_traces),
                 gamma_loadings_trace=new_gamma_loadings_trace,
                 swap_accepts=swap_accepts,
@@ -344,6 +423,7 @@ def _run_multi_longbet_mcmc(
             alpha=carry.alpha_traces[m],
             sigma2=carry.sigma2_traces[m],
             sigma_gamma2=carry.sigma_gamma2_traces[m],
+            trend_coef=carry.trend_coef_traces[m],
             cutpoints=carry.cutpoint_traces[m],
         )
         child_traces.append(tr)

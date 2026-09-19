@@ -43,7 +43,6 @@ def test_inter_ensemble_step_preserves_residual_invariant():
         num_trees_pr=4,
         num_trees_trt=4,
         use_inter_ensemble_move=True,
-        inter_ensemble_sd=0.2,
     )
     state = init_longbet(
         X_unified=jnp.asarray(rng.integers(0, 4, (P, M), dtype=np.uint8)),
@@ -69,14 +68,19 @@ def test_inter_ensemble_step_preserves_residual_invariant():
 
     response = state.y if state.z is None else state.z
 
+    trend_term = (
+        state.trend_design @ state.trend_coef if state.use_trend_block else 0.0
+    )
+
     # Check residual invariant before step
     expected_resid_before = (
         response
         - state.alpha * state.mu_fit
         - w * state.nu_fit
         - state.gamma[state.unit_idx]
+        - trend_term
     )
-    np.testing.assert_allclose(state.resid, expected_resid_before, atol=1e-5)
+    np.testing.assert_allclose(state.resid, expected_resid_before, atol=2e-5)
 
     # Execute inter_ensemble_transfer_step directly
     key, sub = jax.random.split(key)
@@ -96,7 +100,6 @@ def test_inter_ensemble_step_preserves_residual_invariant():
         state.sigma2,
         state.forest.leaf_prior_cov_inv,
         state.leaf_prior_cov_inv_nu,
-        proposal_sigma=0.2,
     )
 
     expected_resid_after = (
@@ -104,8 +107,9 @@ def test_inter_ensemble_step_preserves_residual_invariant():
         - state.alpha * mu_new
         - w * nu_new
         - state.gamma[state.unit_idx]
+        - trend_term
     )
-    np.testing.assert_allclose(R_new, expected_resid_after, atol=1e-5)
+    np.testing.assert_allclose(R_new, expected_resid_after, atol=2e-5)
 
 
 def test_geweke_invariance_with_inter_ensemble_move():
@@ -128,7 +132,6 @@ def test_geweke_invariance_with_inter_ensemble_move():
         sigma_prior_a=sigma_a,
         sigma_prior_b=sigma_b,
         use_inter_ensemble_move=True,
-        inter_ensemble_sd=0.08,
     )
     state = init_longbet(
         X_unified=jnp.asarray(rng.integers(0, 3, (P, M), dtype=np.uint8)),

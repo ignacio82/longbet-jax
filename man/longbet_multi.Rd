@@ -10,7 +10,8 @@ longbet_multi(y, x, z, t = NULL, x_trt = NULL, x_tv = NULL, x_trt_tv = NULL,
   max_depth_pr = 8, max_depth_trt = 8, alpha_split_pr = 0.95,
   beta_split_pr = 2, alpha_split_trt = 0.25, beta_split_trt = 3,
   num_cutpoints = 100, sig_knl = 1, lambda_knl = 1, kernel_type = "se",
-  sigma_m = 1, gp_constant_mean = TRUE, split_time_ps = TRUE,
+  sigma_m = 1, gp_constant_mean = TRUE, trend_num_features = 64,
+  split_time_ps = NULL,
   split_calendar_trt = TRUE, split_exposure_trt = FALSE, random_intercept = TRUE,
   gamma_prior_a = 1,
   gamma_prior_b = 0.1, sigma_prior_a = 2, sigma_prior_b = 1,
@@ -47,7 +48,15 @@ to \code{x}.}
 \code{"ar1"}.}
 \item{sigma_m}{Prior standard deviation of the marginalized constant GP mean.}
 \item{gp_constant_mean}{Whether the projection reverts to an estimated common level.}
-\item{split_time_ps}{Whether prognostic forest may split on calendar time.}
+\item{trend_num_features}{Random Fourier features in the unit feature map of
+the calendar-time block. More capacity to represent a trend whose covariate
+loading is nonlinear, at more cost per sweep. The horseshoe prior on the
+block shrinks each column on its own evidence, so raising this is close to
+free statistically; the cost is arithmetic.}
+
+\item{split_time_ps}{Whether prognostic forests may split on calendar time.
+\code{NULL}, the default, derives it from the calendar-time block exactly as in
+\code{\link[=longbet]{longbet()}}.}
 \item{split_calendar_trt}{Whether treatment forests may split on calendar time
 (see \code{\link[=longbet]{longbet()}}).}
 

@@ -44,6 +44,12 @@ from longbet._multi_io import load_multi_npz, save_multi_npz
 from longbet._multi_loop import MultiLongBetTrace, run_multi_longbet_mcmc
 from longbet._multi_state import MultiLongBetState, init_multi_longbet
 from longbet._sur import SAMPLER_SEMANTICS
+from longbet._trend_basis import (
+    build_period_basis,
+    build_time_basis,
+    build_trend_design,
+    build_unit_features,
+)
 
 
 class OutcomeList(list):
@@ -187,6 +193,13 @@ class LongBetMulti:
         self.meany: tuple[float, ...] | None = None
         self.sdy: tuple[float, ...] | None = None
         self.offset_: tuple[float, ...] | None = None
+        # Calendar-time trend block, shared by every outcome because it depends
+        # only on (x, t). Mirrors the three attributes ``LongBet`` carries, and
+        # is copied verbatim onto each child fit so ``child.predict`` can
+        # rebuild the block.
+        self.trend_time_basis_: np.ndarray | None = None
+        self.trend_period_basis_: np.ndarray | None = None
+        self.trend_feature_spec_: Any = None
         self.sampler_semantics: str = SAMPLER_SEMANTICS
         self.rng_scheme_version: int = 1
         self.provenance: str = ""
@@ -369,6 +382,40 @@ class LongBetMulti:
         X_unified_np = shared_design.build(raw_covars)
         X_unified = jnp.asarray(X_unified_np, dtype=jnp.uint8)
 
+        # Conjugate calendar-time block, built exactly as ``LongBet._fit_impl``
+        # builds it and shared by every outcome: the bases depend only on
+        # ``(T, x)``, both of which are common to the M equations, and no chain
+        # key touches them. Without this the shipped default
+        # ``split_calendar_mu=False`` would leave the coupled model with no way
+        # to represent calendar time at all.
+        trend_design = None
+        trend_num_period = 0
+        if cfg.use_trend_block:
+            self.trend_time_basis_ = build_time_basis(T, cfg.trend_degree)
+            self.trend_period_basis_ = (
+                build_period_basis(T) if cfg.trend_period_effects
+                else np.zeros((T, 0), dtype=np.float32)
+            )
+            features, self.trend_feature_spec_ = build_unit_features(
+                x_np, cfg.trend_num_features
+            )
+            n_inter = self.trend_time_basis_.shape[1] * features.shape[1]
+            trend_num_period = int(self.trend_period_basis_.shape[1])
+            if n_inter + trend_num_period > 0:
+                trend_design = build_trend_design(
+                    features, self.trend_time_basis_, unit_idx, time_idx,
+                    period=self.trend_period_basis_,
+                )
+            else:
+                self.trend_time_basis_ = None
+                self.trend_period_basis_ = None
+                self.trend_feature_spec_ = None
+                trend_num_period = 0
+        else:
+            self.trend_time_basis_ = None
+            self.trend_period_basis_ = None
+            self.trend_feature_spec_ = None
+
         unit_idx = jnp.asarray(unit_idx, dtype=jnp.int32)
         time_idx = jnp.asarray(time_idx, dtype=jnp.int32)
         exposure_idx = jnp.asarray(exposure_idx, dtype=jnp.int32)
@@ -390,6 +437,8 @@ class LongBetMulti:
                 max_split_nu=max_split_nu,
                 norm_input=norm_in,
                 config=cfg,
+                trend_design=trend_design,
+                trend_num_period=trend_num_period,
                 num_chains=cfg.num_chains * cfg.tempering_levels,
                 init_key=k_init,
             )
@@ -431,6 +480,15 @@ class LongBetMulti:
             child_model.S_max_ = S_max
             child_model.t_fit_ = t_vec
             child_model.fitted_t_ = t_vec
+            # The trend block is shared, so the children share the objects
+            # rather than copies: ``LongBet.predict`` reads all three (the time
+            # basis, the period basis and the feature spec) and reproduces the
+            # in-sample trend only if they are the ones the sampler was fitted
+            # against. The per-outcome coefficients live on
+            # ``child_model.trace.trend_coef``, which _multi_loop fills in.
+            child_model.trend_time_basis_ = self.trend_time_basis_
+            child_model.trend_period_basis_ = self.trend_period_basis_
+            child_model.trend_feature_spec_ = self.trend_feature_spec_
 
             child_fits.append(child_model)
 

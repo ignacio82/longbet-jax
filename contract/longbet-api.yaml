@@ -32,6 +32,10 @@ version: "3.0.0"
 # Config fields that are deliberately not part of the user-facing contract.
 internal:
   - sample_beta   # switches off the GP draw; used only by the BCF reduction test
+  - trend_period_effects   # removes the free common-time factor; with the
+                           # forest barred from calendar time this leaves the
+                           # model unable to fit a common shock at all, so it
+                           # exists only to reproduce the paper's ablation
 
 arguments:
   # -- sampler ---------------------------------------------------------------
@@ -171,13 +175,51 @@ arguments:
     expose_in_r: true
     description: Whether the GP reverts to an estimated common level.
 
+  # -- calendar-time block -----------------------------------------------------
+  - python_name: use_trend_block
+    r_name: use_trend_block
+    type: boolean
+    default: true
+    expose_in_r: false
+    description: Whether the prognostic surface carries an explicit conjugate calendar-time component drawn jointly with the unit intercepts and the exposure trajectory. Off reproduces the pre-block model and is kept for ablation.
+  - python_name: trend_horseshoe
+    r_name: trend_horseshoe
+    type: boolean
+    default: false
+    expose_in_r: false
+    description: Whether the heterogeneous-trend coefficients get a horseshoe prior rather than a ridge. Off is the default; on is available when aggressive column-level sparsity is desired.
+  - python_name: trend_num_features
+    r_name: trend_num_features
+    type: integer
+    default: 64
+    expose_in_r: true
+    description: Random Fourier features in the unit feature map of the trend block. More capacity to represent a nonlinear trend loading, at more cost per sweep.
+  - python_name: trend_degree
+    r_name: trend_degree
+    type: integer
+    default: 2
+    expose_in_r: false
+    description: Number of smooth polynomial time functions interacted with the unit features.
+  - python_name: trend_prior_scale
+    r_name: trend_prior_scale
+    type: float
+    default: 2.0
+    expose_in_r: false
+    description: Prior standard deviation of a unit's trend deviation on the standardized response; also the horseshoe's global scale.
+  - python_name: trend_period_scale
+    r_name: trend_period_scale
+    type: float
+    default: 2.0
+    expose_in_r: false
+    description: Prior standard deviation of the free common-time factor on the standardized response.
+
   # -- structure -------------------------------------------------------------
   - python_name: split_calendar_mu
     r_name: split_time_ps
-    type: boolean
-    default: true
+    type: boolean_or_null
+    default: null
     expose_in_r: true
-    description: Whether the prognostic forest may split on calendar time.
+    description: Whether the prognostic forest may split on calendar time. Null (the default) derives it from the calendar-time block; the forest keeps its splits only when nothing else can carry calendar time.
   - python_name: split_calendar_trt
     r_name: split_calendar_trt
     type: boolean
@@ -207,13 +249,7 @@ arguments:
     type: boolean
     default: true
     expose_in_r: false
-    description: Whether to run the inter-ensemble residual-transfer Metropolis-Hastings step between mu and nu each sweep.
-  - python_name: inter_ensemble_sd
-    r_name: inter_ensemble_sd
-    type: float
-    default: 0.05
-    expose_in_r: false
-    description: Proposal standard deviation for the level and slope shifts in the inter-ensemble transfer step.
+    description: Whether to run the exact conjugate subspace Gibbs transfer between mu and nu each sweep.
 
   # -- priors ----------------------------------------------------------------
   - python_name: random_intercept

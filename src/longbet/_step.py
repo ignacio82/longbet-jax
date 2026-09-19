@@ -59,6 +59,11 @@ from longbet._inter_ensemble_move import (
 )
 from longbet._ridge import ridge_scale_step
 from longbet._scales import compute_treatment_scale_attrs
+from longbet._trend_basis import (
+    horseshoe_col_scales,
+    sample_horseshoe,
+    trend_block_step,
+)
 from longbet._state import LongBetState, chain_filter_spec
 
 #: Below this weight a cell carries no information about ``nu`` and is dropped
@@ -138,7 +143,8 @@ def longbet_single_step(
     Sweep order (plan section 4.9)::
 
         z (binary only) -> mu -> nu -> beta -> gamma -> sigma_gamma^2
-                        -> sigma^2 -> ridge move
+                        -> ridge move -> subspace transfers
+                        -> (c, gamma, beta) joint draw -> sigma^2
 
     Any order is valid provided each draw conditions on current values; this one
     keeps ``R`` consistent with the least bookkeeping and puts the variance draws
@@ -479,13 +485,97 @@ def longbet_single_step(
             state.leaf_prior_cov_inv_nu,
             conditional_precision=conditional_precision,
             temperature=temp,
-            proposal_sigma=state.inter_ensemble_sd,
             unit_idx=state.unit_idx,
             N_units=state.N_units,
             X_unified=state.X,
             y_vec=state.y,
         )
         view_mu = eqx.tree_at(lambda v: v.forest, view_mu, view_mu_forest)
+
+    # ------------------------------------------------------------------
+    # 8b. Smooth trend block, drawn jointly with gamma and beta
+    # ------------------------------------------------------------------
+    # The forests are held fixed here, and conditional on them the model is
+    # linear-Gaussian in (c, gamma, beta), so this draw is from their exact
+    # joint conditional: acceptance one, no tuning. Drawing the three together
+    # rather than in sequence is what removes the ridge between the baseline
+    # trend, the unit levels and the exposure profile -- a coordinate-wise
+    # sweep through blocks this dependent crawls along it. See
+    # ``longbet._trend_basis``.
+    trend_coef_new = state.trend_coef
+    trend_local2_new = state.trend_local2
+    trend_local_aux_new = state.trend_local_aux
+    trend_global2_new = state.trend_global2
+    trend_global_aux_new = state.trend_global_aux
+    if state.use_trend_block:
+        temp_tb = (
+            jnp.float32(1.0)
+            if state.temperature is None
+            else jnp.asarray(state.temperature, dtype=jnp.float32)
+        )
+        # Under the horseshoe the interaction columns' prior scale is the
+        # current tau * lambda_j; under the ridge it is the fixed vector. Either
+        # way the block below is the same exact Gaussian draw -- the horseshoe
+        # is conjugate precisely so that it does not have to change.
+        if state.use_trend_horseshoe:
+            col_scale = horseshoe_col_scales(
+                jnp.asarray(state.trend_prior_scale_vec, dtype=jnp.float32),
+                state.trend_num_period,
+                state.trend_local2,
+                state.trend_global2,
+            )
+        else:
+            col_scale = jnp.asarray(
+                state.trend_prior_scale_vec, dtype=jnp.float32
+            )
+        trend_coef_new, gamma_new, beta_new, R = trend_block_step(
+            random.fold_in(key, 9311),
+            state.trend_coef,
+            gamma_new,
+            beta_new,
+            R,
+            state.trend_design,
+            b_z * nu_fit,
+            obs_mask,
+            state.unit_idx,
+            state.N_units,
+            state.exposure_idx,
+            sigma2,
+            sigma_gamma2_new,
+            state.K_chol,
+            col_scale,
+            state.random_intercept,
+            state.sample_beta,
+            conditional_precision=conditional_precision,
+            temperature=temp_tb,
+        )
+        if state.use_trend_horseshoe:
+            # Scales given the coefficients just drawn. Ordering matters only
+            # in that both directions are valid Gibbs sweeps; drawing the
+            # scales last means the state carries scales consistent with the
+            # coefficients it also carries.
+            (
+                trend_local2_new,
+                trend_local_aux_new,
+                trend_global2_new,
+                trend_global_aux_new,
+            ) = sample_horseshoe(
+                random.fold_in(key, 9313),
+                trend_coef_new[state.trend_num_period:],
+                state.trend_local2,
+                state.trend_local_aux,
+                state.trend_global2,
+                state.trend_global_aux,
+                state.trend_hs_global_scale,
+            )
+        if state.random_intercept:
+            # gamma moved, so its variance is redrawn from the conditional that
+            # matches the values now in the state.
+            sigma_gamma2_new = _sample_inv_gamma(
+                random.fold_in(key, 9312),
+                jnp.float32(state.gamma_prior_a + state.N_units / 2.0),
+                state.gamma_prior_b + 0.5 * jnp.sum(jnp.square(gamma_new)),
+            )
 
     # ------------------------------------------------------------------
     # 9. Error variance sigma^2
@@ -549,6 +639,11 @@ def longbet_single_step(
             s.sigma_gamma2,
             s.mu_fit,
             s.nu_fit,
+            s.trend_coef,
+            s.trend_local2,
+            s.trend_local_aux,
+            s.trend_global2,
+            s.trend_global_aux,
         ),
         state,
         (
@@ -586,6 +681,11 @@ def longbet_single_step(
             sigma_gamma2_new,
             mu_fit,
             nu_fit,
+            trend_coef_new,
+            trend_local2_new,
+            trend_local_aux_new,
+            trend_global2_new,
+            trend_global_aux_new,
         ),
         is_leaf=lambda x: x is None,
     )

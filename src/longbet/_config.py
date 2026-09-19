@@ -51,11 +51,14 @@ class LongBetConfig:
     Every sweep updates both forests with GROW, PRUNE, CHANGE and one
     data-driven REGROW proposal per forest, then the exposure trajectory, the
     unit intercepts, the variances, a Metropolis move along the exact scale
-    ridge between ``beta`` and the treatment leaves, and an inter-ensemble
-    residual-transfer move between ``mu`` and ``nu``. Parallel tempering
-    (``tempering_levels``) is available for posteriors whose forest modes the
-    local moves connect too slowly. Chains start overdispersed from the prior
-    so that R-hat measures convergence rather than seed agreement.
+    ridge between ``beta`` and the treatment leaves, and an exact conjugate
+    subspace Gibbs transfer between ``mu`` and ``nu``. When the calendar-time
+    block is on, the trend coefficients, the unit intercepts and the exposure
+    trajectory are then drawn together from their exact joint Gaussian
+    conditional. Parallel tempering (``tempering_levels``) is available for
+    posteriors whose forest modes the local moves connect too slowly. Chains
+    start overdispersed from the prior so that R-hat measures convergence
+    rather than seed agreement.
 
     Defaults
     --------
@@ -94,11 +97,70 @@ class LongBetConfig:
     tempering_beta_min
         Inverse temperature of the hottest replica, in ``(0, 1]``.
     use_inter_ensemble_move
-        Whether to run the inter-ensemble residual-transfer Metropolis-Hastings
-        step between ``mu`` and ``nu`` each sweep.
-    inter_ensemble_sd
-        Proposal standard deviation for the level and slope shifts in the
-        inter-ensemble transfer step.
+        Whether to run the exact conjugate subspace Gibbs transfer between
+        ``mu`` and ``nu`` each sweep. The two ensembles are only jointly
+        identified through the treatment indicator, so a component of the fit
+        can move between them at nearly constant likelihood; this step samples
+        along that subspace in closed form instead of leaving the chain to
+        random-walk down it.
+    use_trend_block
+        Whether the prognostic surface carries an explicit conjugate
+        calendar-time component,
+
+        ``sum_k psi_k(t) f_k + sum_m phi_m(t) b(X_i)' c_m``,
+
+        drawn jointly with the unit intercepts and the exposure trajectory from
+        their exact Gaussian conditional. The first term is a free common-time
+        factor, the second the heterogeneous trend; they are orthogonal by
+        construction. See ``longbet._trend_basis``.
+
+        The block exists because a sum of trees is piecewise constant in
+        calendar time while the trajectory ``beta_S`` has one free coordinate
+        per period, and on a staggered panel the identity
+        ``t = (E_i - 1) + S_it`` ties the two together. The mismatch leaves a
+        chain-specific remainder that no leaf shift can cancel. Note that the
+        block only *removes* the mismatch if the forest is not also fitting
+        calendar time -- otherwise the two compete for the same signal and a new
+        ridge appears in place of the old one. Use it together with
+        ``split_calendar_mu = False``.
+    trend_degree
+        Number of orthonormal polynomial basis functions in the heterogeneous
+        trend. ``1`` is a linear trend, ``2`` (the default) adds curvature. This
+        governs only how a unit's trend may *deviate* from the common one; the
+        common time factor is unrestricted whenever
+        ``trend_period_effects`` is on.
+    trend_num_features
+        Random Fourier features in the unit feature map, on top of the
+        standardized covariates. They are what let the block carry a trend whose
+        covariate loading is nonlinear; drawn from a fixed seed, so the map is
+        identical in every chain.
+    trend_prior_scale
+        Prior standard deviation of a unit's trend *deviation* on the
+        standardized response. The per-coefficient prior is rescaled by the
+        basis size, so this stays interpretable as the basis grows.
+    trend_period_effects
+        Whether to include the free common-time factor ``sum_k psi_k(t) f_k``,
+        a complete centred basis over calendar periods. This is what replaces
+        the forest's calendar-time step functions when ``split_calendar_mu`` is
+        off, so turning it off there leaves the model with no way to fit a
+        common shock.
+    trend_period_scale
+        Prior standard deviation of the common time factor on the standardized
+        response. Deliberately looser than ``trend_prior_scale`` and *not*
+        rescaled by the basis size: every period has data, so the factor is well
+        identified and should not be shrunk hard.
+    trend_horseshoe
+        Whether the *interaction* half of the trend block gets a horseshoe
+        prior instead of a ridge. The block asks order 10^2 columns which
+        covariates carry a diverging baseline trend, and typically only a
+        handful do; one ridge scale must either shrink those or let the rest
+        absorb noise. The horseshoe's global scale is ``trend_prior_scale``
+        divided by the square root of the basis size -- the ridge value -- so
+        the two priors agree on typical magnitude and differ only in tail
+        weight. The common-time factor is never horseshoe'd. Sampled by the
+        inverse-Gamma scheme of Makalic and Schmidt (2016), which keeps the
+        model conditionally Gaussian in the coefficients and so leaves the
+        exact joint ``(c, gamma, beta)`` draw intact.
     num_trees_pr, num_trees_trt
         Trees in the prognostic and treatment forests. The treatment forest
         needs more trees than a prognostic one of the same size: with 20 trees
@@ -125,7 +187,17 @@ class LongBetConfig:
         that marginalized mean is included, so projections beyond the fitted
         horizon revert to an estimated common level rather than to zero.
     split_calendar_mu
-        Whether the prognostic forest may split on calendar time.
+        Whether the prognostic forest may split on calendar time. ``None``
+        (the default) derives it, and deriving it is the point: this is not an
+        independent choice but a consequence of whether anything else in the
+        model can carry calendar time. With the calendar-time block on, the
+        period basis already spans every function of ``t``, so tree splits on
+        ``t`` are redundant and actively harmful -- the two overlap, the design
+        goes near-collinear, and the chains disagree about which one holds the
+        trend. With the block off, the trees are the only thing that can fit a
+        common shock and must keep the splits. Setting this explicitly is
+        supported for ablation; the combination that leaves nothing able to fit
+        calendar time raises.
     split_calendar_trt
         Whether the treatment forest may split on calendar time.
     split_exposure_trt
@@ -174,7 +246,13 @@ class LongBetConfig:
     tempering_levels: int = 1
     tempering_beta_min: float = 0.05
     use_inter_ensemble_move: bool = True
-    inter_ensemble_sd: float = 0.05
+    use_trend_block: bool = True
+    trend_degree: int = 2
+    trend_num_features: int = 64
+    trend_prior_scale: float = 2.0
+    trend_period_effects: bool = True
+    trend_period_scale: float = 2.0
+    trend_horseshoe: bool = False
 
     # --- forests -----------------------------------------------------------
     num_trees_pr: int = 20
@@ -197,7 +275,7 @@ class LongBetConfig:
     gp_constant_mean: bool = True
 
     # --- structure ---------------------------------------------------------
-    split_calendar_mu: bool = True
+    split_calendar_mu: bool | None = None
     split_calendar_trt: bool = True
     split_exposure_trt: bool = False
 
@@ -226,6 +304,35 @@ class LongBetConfig:
     sur_prior_var: float = 1.0
 
     def __post_init__(self) -> None:
+        # --- resolve split_calendar_mu before anything validates booleans ----
+        # Whether the prognostic forest should be allowed to cut calendar time
+        # is not a free choice: it depends on whether something else in the
+        # model can carry calendar time. Getting it wrong is silently
+        # catastrophic in both directions, so the default is derived rather
+        # than fixed.
+        #
+        #   block on  -> the DCT period basis spans every function of calendar
+        #                time, so tree splits on t are redundant *and* harmful:
+        #                the two span overlapping subspaces, the design goes
+        #                near-collinear, and chains disagree about the split
+        #                (R-hat 1.10, and NaN draws on one replicate).
+        #   block off -> the trees are the only thing left that can fit a
+        #                common time shock, so they must keep the splits
+        #                (without them, RMSE degrades ~30x at zero coverage).
+        can_carry_time = bool(self.use_trend_block) and bool(self.trend_period_effects)
+        if self.split_calendar_mu is None:
+            object.__setattr__(self, "split_calendar_mu", not can_carry_time)
+        elif self.split_calendar_mu is False and not can_carry_time:
+            raise ValueError(
+                "split_calendar_mu=False removes calendar time from the "
+                "prognostic forest, but use_trend_block="
+                f"{self.use_trend_block} and trend_period_effects="
+                f"{self.trend_period_effects} leave nothing able to fit a "
+                "common time shock in its place. Either leave "
+                "split_calendar_mu=None (the default, which resolves this for "
+                "you) or enable the calendar-time block."
+            )
+
         for name in ("num_sweeps", "num_burnin", "n_skip", "num_chains", "num_trees_pr",
                      "num_trees_trt", "min_points_per_leaf_pr", "min_points_per_leaf_trt",
                      "max_depth_pr", "max_depth_trt", "num_cutpoints", "random_seed"):
@@ -250,10 +357,17 @@ class LongBetConfig:
         if not (isinstance(self.tempering_beta_min, Real) and not isinstance(self.tempering_beta_min, bool)
                 and 0 < self.tempering_beta_min <= 1):
             raise ValueError("tempering_beta_min must be in (0, 1]")
-        if (isinstance(self.inter_ensemble_sd, bool) or not isinstance(self.inter_ensemble_sd, Real)
-                or not math.isfinite(self.inter_ensemble_sd) or self.inter_ensemble_sd <= 0):
-            raise ValueError("inter_ensemble_sd must be a finite positive scalar")
-        object.__setattr__(self, "inter_ensemble_sd", float(self.inter_ensemble_sd))
+        for name in ("trend_degree", "trend_num_features"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
+                raise ValueError(f"{name} must be a nonnegative integer, got {value!r}")
+            object.__setattr__(self, name, int(value))
+        for name in ("trend_prior_scale", "trend_period_scale"):
+            value = getattr(self, name)
+            if (isinstance(value, bool) or not isinstance(value, Real)
+                    or not math.isfinite(value) or value <= 0):
+                raise ValueError(f"{name} must be a finite positive scalar")
+            object.__setattr__(self, name, float(value))
         for name in ("num_trees_pr", "num_trees_trt", "min_points_per_leaf_pr",
                      "min_points_per_leaf_trt", "max_depth_pr", "max_depth_trt", "num_cutpoints"):
             if getattr(self, name) < 1:
@@ -274,7 +388,9 @@ class LongBetConfig:
                 raise ValueError(f"{name} must be a finite nonnegative scalar, got {value!r}")
         for name in ("split_calendar_mu", "split_calendar_trt", "split_exposure_trt",
                      "random_intercept", "gp_constant_mean", "sample_beta",
-                     "standardize", "sur", "use_inter_ensemble_move"):
+                     "standardize", "sur", "use_inter_ensemble_move",
+                     "use_trend_block", "trend_period_effects",
+                     "trend_horseshoe"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean")
         for name in ("gamma_prior_a", "gamma_prior_b", "sigma_prior_a", "sigma_prior_b"):

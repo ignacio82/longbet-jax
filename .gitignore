@@ -24,3 +24,10 @@ build/
 # Benchmark scratch & logs
 benchmarks/ordinal_results/.tmp/
 benchmarks/ordinal_results/logs/
+
+# GPU Cloud Testing & Execution
+Dockerfile.gputest
+gpu_startup_test.sh
+test_gpu_run.py
+scripts/run_gpu_cloud.sh
+docs/gpu_cloud_execution.md

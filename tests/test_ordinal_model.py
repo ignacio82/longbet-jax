@@ -70,6 +70,8 @@ def assert_invariants(state, check_latents=True):
                        np.asarray(state.b1)[..., None], np.asarray(state.b0)[..., None])
             * np.asarray(state.beta)[..., np.asarray(state.exposure_idx)] * np.asarray(state.nu_fit)
             + np.asarray(state.gamma)[..., np.asarray(state.unit_idx)])
+    if getattr(state, "use_trend_block", False):
+        mean = mean + np.asarray(state.trend_coef) @ np.asarray(state.trend_design).T
     mask, labels = np.asarray(state.obs_mask), np.asarray(state.y, int)
     np.testing.assert_allclose(state.resid, np.where(mask, np.asarray(state.z)-mean, 0), atol=2e-5)
     assert (np.asarray(state.sigma2) == 1).all()

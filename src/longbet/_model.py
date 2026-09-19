@@ -39,6 +39,15 @@ from longbet._ordinal import category_probabilities, prepare_ordinal
 from longbet._summary import choose_ordinal_block_size
 from longbet._loop import LongBetTrace, run_longbet_mcmc
 from longbet._state import LongBetState, init_longbet
+from longbet._trend_basis import (
+    apply_unit_features,
+    build_period_basis,
+    build_time_basis,
+    build_trend_design,
+    build_unit_features,
+    evaluate_trend,
+    extend_period_basis,
+)
 from longbet._summary import (
     BlockAccumulator,
     PosteriorSummary,
@@ -165,6 +174,42 @@ def _as_cell_major(a: np.ndarray) -> np.ndarray:
     a = np.asarray(a, dtype=np.float32)
     n, t, p = a.shape
     return a.reshape(n * t, p).T
+
+
+def _extend_time_basis(phi_fit: np.ndarray, T_new: int) -> np.ndarray:
+    """Continue a fitted time basis past the end of the fitted window.
+
+    The fitted columns are polynomials in a normalization of the period index.
+    Extrapolating them means continuing the *same* polynomials, not refitting an
+    orthonormal basis on the longer grid -- which would silently rescale what
+    period ``t`` means and shift the in-sample fit. The coefficients are
+    recovered by least squares on the fitted grid and then evaluated on the
+    longer one.
+
+    Parameters
+    ----------
+    phi_fit
+        Fitted basis, shape ``(T_fit, d)``.
+    T_new
+        Length of the prediction panel, ``> T_fit``.
+
+    Returns
+    -------
+    np.ndarray
+        Shape ``(T_new, d)``, float32.
+    """
+    T_fit, d = phi_fit.shape
+    if d == 0:
+        return np.zeros((T_new, 0), dtype=np.float32)
+    # Normalize the period index the same way build_time_basis does, then read
+    # off the polynomial coefficients of each fitted column.
+    denom = max(T_fit - 1, 1)
+    u_fit = (2.0 * np.arange(T_fit, dtype=np.float64) / denom) - 1.0
+    u_new = (2.0 * np.arange(T_new, dtype=np.float64) / denom) - 1.0
+    V_fit = np.vander(u_fit, N=d + 1, increasing=True)
+    coef, *_ = np.linalg.lstsq(V_fit, phi_fit.astype(np.float64), rcond=None)
+    V_new = np.vander(u_new, N=d + 1, increasing=True)
+    return (V_new @ coef).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +504,12 @@ class LongBet:
         self.S_max_: int = 0
         self.t_fit_: np.ndarray | None = None
         self.untreated_counts_per_t_: np.ndarray | None = None
+        #: Fitted smooth calendar-time basis, shape ``(T, d)``, and the unit
+        #: feature map that goes with it. Kept so ``predict`` maps new units
+        #: through exactly the basis the sampler was fitted with.
+        self.trend_time_basis_: np.ndarray | None = None
+        self.trend_period_basis_: np.ndarray | None = None
+        self.trend_feature_spec_: Any = None
         self.multi_origin: dict[str, Any] | None = None
 
     # -- fitting -----------------------------------------------------------
@@ -655,6 +706,39 @@ class LongBet:
         )
         X_unified = self.design_.build(raw)
 
+        # Conjugate calendar-time block. Both bases and the unit feature map are
+        # deterministic given (T, x) -- no chain key touches any of them -- so
+        # every chain carries the same component and can only disagree about its
+        # coefficients, which is what makes R-hat on the baseline trend
+        # informative. See ``longbet._trend_basis``.
+        trend_design = None
+        trend_num_period = 0
+        if self.config.use_trend_block:
+            self.trend_time_basis_ = build_time_basis(T, self.config.trend_degree)
+            self.trend_period_basis_ = (
+                build_period_basis(T) if self.config.trend_period_effects
+                else np.zeros((T, 0), dtype=np.float32)
+            )
+            features, self.trend_feature_spec_ = build_unit_features(
+                x_np, self.config.trend_num_features
+            )
+            n_inter = self.trend_time_basis_.shape[1] * features.shape[1]
+            trend_num_period = int(self.trend_period_basis_.shape[1])
+            if n_inter + trend_num_period > 0:
+                trend_design = build_trend_design(
+                    features, self.trend_time_basis_, unit_idx, time_idx,
+                    period=self.trend_period_basis_,
+                )
+            else:
+                self.trend_time_basis_ = None
+                self.trend_period_basis_ = None
+                self.trend_feature_spec_ = None
+                trend_num_period = 0
+        else:
+            self.trend_time_basis_ = None
+            self.trend_period_basis_ = None
+            self.trend_feature_spec_ = None
+
         total_chains = self.config.num_chains * self.config.tempering_levels
         num_chains = total_chains if total_chains > 1 else None
         self.state = init_longbet(
@@ -669,6 +753,8 @@ class LongBet:
             max_split_nu=jnp.asarray(self.design_.max_split_nu),
             config=self.config,
             offset=self.offset_,
+            trend_design=trend_design,
+            trend_num_period=trend_num_period,
             num_chains=num_chains,
             chain_key=k_chains,
         )
@@ -1020,6 +1106,38 @@ class LongBet:
                 stacklevel=4,
             )
 
+        # Smooth calendar-time block. New units go through the *fitted* feature
+        # map, and the time basis is the fitted one evaluated at this panel's
+        # period index, so a prediction panel of the same length reproduces the
+        # in-sample trend exactly. A longer one extends it, which is what a
+        # polynomial trend means; the exposure trajectory's projection is
+        # separately governed by the GP.
+        trend_coef_flat = None
+        trend_features_pred = None
+        trend_phi_pred = None
+        trend_period_pred = None
+        trend_trace = getattr(self.trace, "trend_coef", None)
+        if (
+            trend_trace is not None
+            and self.trend_time_basis_ is not None
+            and self.trend_feature_spec_ is not None
+            and np.asarray(trend_trace).shape[-1] > 0
+        ):
+            trend_coef_flat = flat(np.asarray(trend_trace))
+            trend_features_pred = apply_unit_features(x_np, self.trend_feature_spec_)
+            phi_fit = np.asarray(self.trend_time_basis_, dtype=np.float32)
+            if T <= phi_fit.shape[0]:
+                trend_phi_pred = phi_fit[:T]
+            else:
+                # Extend the fitted polynomials to the longer panel on the same
+                # normalization, so period t means the same thing it did in the
+                # fit rather than being rescaled by the new horizon.
+                trend_phi_pred = _extend_time_basis(phi_fit, T)
+            if self.trend_period_basis_ is not None:
+                trend_period_pred = extend_period_basis(
+                    np.asarray(self.trend_period_basis_, dtype=np.float32), T
+                )
+
         # Per-cell quantities are expanded inside the block loop, not before
         # it: a (draws, N*T) array here would defeat the whole point of blocking.
         beta_0 = beta_flat[:, 0:1]
@@ -1104,13 +1222,27 @@ class LongBet:
             beta_S = beta_flat[:, exposure_idx[sl]]
             bz = np.where(z_vec[None, sl] == 1.0, b1, b0)
             g = gamma_flat[:, unit_idx[sl]] if has_gamma else 0.0
+            # The smooth trend is part of the prognostic surface, so it enters
+            # both the untreated counterfactual and the factual outcome, and
+            # cancels out of the effect.
+            if trend_coef_flat is not None:
+                tr = evaluate_trend(
+                    trend_coef_flat,
+                    trend_features_pred,
+                    trend_phi_pred,
+                    unit_idx[sl],
+                    time_idx[sl],
+                    period=trend_period_pred,
+                )
+            else:
+                tr = 0.0
 
             # Treatment-only coding (b0 = 0, b1 = 1): the effect of being S
             # periods into treatment is beta_S * nu, and zero before treatment.
             s_active = (exposure_idx[sl] >= 1)[None, :]
             tau = (b1 * beta_S * nu_f * s_active) * scale
-            mu0 = (alpha_d * mu_f + g) * scale + centre
-            yhat = (alpha_d * mu_f + bz * beta_S * nu_f + g) * scale + centre
+            mu0 = (alpha_d * mu_f + tr + g) * scale + centre
+            yhat = (alpha_d * mu_f + tr + bz * beta_S * nu_f + g) * scale + centre
 
             # ATT sums by exposure time, accumulated rather than aligned into an
             # (N, S_max, draws) array.
@@ -1275,7 +1407,71 @@ class LongBet:
                 "t_fit": np.asarray(self.t_fit_).tolist() if self.t_fit_ is not None else [],
                 "design": self.design_.to_dict(),
                 "multi_origin": self.multi_origin,
+                "trend_basis": self._trend_basis_to_dict(),
             },
+        )
+
+    def _trend_basis_to_dict(self) -> dict[str, Any] | None:
+        """JSON-serializable form of the trend basis, or ``None``.
+
+        The feature map is part of the model, not a derived quantity: a reloaded
+        fit must map new covariates through the same standardization, the same
+        centring and the same random projection, or its trend coefficients mean
+        something else.
+        """
+        if self.trend_time_basis_ is None or self.trend_feature_spec_ is None:
+            return None
+        spec = self.trend_feature_spec_
+        period = self.trend_period_basis_
+        return {
+            "phi": np.asarray(self.trend_time_basis_, dtype=np.float64).tolist(),
+            "period": (
+                None if period is None
+                else np.asarray(period, dtype=np.float64).tolist()
+            ),
+            "mean": np.asarray(spec.mean).tolist(),
+            "scale": np.asarray(spec.scale).tolist(),
+            "omega": np.asarray(spec.omega).tolist(),
+            "phase": np.asarray(spec.phase).tolist(),
+            "centre": np.asarray(spec.centre).tolist(),
+            "col_scale": np.asarray(spec.col_scale).tolist(),
+            "num_raw": int(spec.num_raw),
+        }
+
+    def _trend_basis_from_dict(self, d: dict[str, Any] | None) -> None:
+        """Restore the trend basis saved by :meth:`_trend_basis_to_dict`."""
+        if not d:
+            self.trend_time_basis_ = None
+            self.trend_period_basis_ = None
+            self.trend_feature_spec_ = None
+            return
+        from longbet._trend_basis import TrendFeatureSpec
+
+        self.trend_time_basis_ = np.asarray(d["phi"], dtype=np.float32).reshape(
+            len(d["phi"]), -1
+        )
+        period = d.get("period")
+        self.trend_period_basis_ = (
+            None if period is None
+            else np.asarray(period, dtype=np.float32).reshape(len(period), -1)
+        )
+        omega = np.asarray(d["omega"], dtype=np.float64)
+        if omega.ndim == 1:
+            omega = omega.reshape(int(d["num_raw"]), -1)
+        col_scale = np.asarray(d["col_scale"], dtype=np.float64)
+        # Archives written before the feature map was centred have no "centre"
+        # entry; zero reproduces their behaviour exactly.
+        centre = np.asarray(
+            d.get("centre", np.zeros_like(col_scale)), dtype=np.float64
+        )
+        self.trend_feature_spec_ = TrendFeatureSpec(
+            mean=np.asarray(d["mean"], dtype=np.float64),
+            scale=np.asarray(d["scale"], dtype=np.float64),
+            omega=omega,
+            phase=np.asarray(d["phase"], dtype=np.float64),
+            centre=centre,
+            col_scale=col_scale,
+            num_raw=int(d["num_raw"]),
         )
 
     @classmethod
@@ -1293,6 +1489,7 @@ class LongBet:
         model.S_max_ = int(meta.get("S_max", 0))
         if meta.get("t_fit"):
             model.t_fit_ = np.asarray(meta["t_fit"], dtype=np.float32)
+        model._trend_basis_from_dict(meta.get("trend_basis"))
         if meta.get("design"):
             model.design_ = Design.from_dict(meta["design"])
             # An extracted multi-outcome child is a scalar archive, so check

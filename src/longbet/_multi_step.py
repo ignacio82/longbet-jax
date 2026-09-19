@@ -24,6 +24,7 @@ import jax.numpy as jnp
 from jax import random
 from jaxtyping import Array, Float32, Int32, Key
 
+from longbet._linalg import sample_from_precision
 from longbet._multi_state import (
     MultiLongBetState,
     multi_chain_filter_spec,
@@ -82,18 +83,12 @@ def sample_loadings(
     P = 0.5 * (P + P.T)
 
     h = (Xo.T @ ro) / sigma2
-    L = jnp.linalg.cholesky(P)  # Lower triangular: P = L @ L.T
 
-    # solve P @ mean = h  <=>  L @ (L.T @ mean) = h
-    mean = jax.scipy.linalg.solve_triangular(
-        L.T, jax.scipy.linalg.solve_triangular(L, h, lower=True), lower=False
-    )
-
-    noise = random.normal(key, (m,), dtype=jnp.float32)
-    # Covariance is P^-1 = (L @ L.T)^-1 = L.T^-1 @ L^-1
-    # Sample mean + L.T^-1 @ noise
-    draw = mean + jax.scipy.linalg.solve_triangular(L.T, noise, lower=False)
-    return draw
+    # The prior term makes P positive definite in exact arithmetic, but two
+    # predecessors with near-identical residuals and a small sigma2 put the
+    # likelihood term many orders of magnitude above it, which is enough for a
+    # float32 Cholesky to fail. See ``longbet._linalg``.
+    return sample_from_precision(key, P, h)
 
 
 @jax.jit

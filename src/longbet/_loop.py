@@ -51,6 +51,7 @@ class LongBetTrace(eqx.Module):
     alpha: Float32[Array, '...']
     sigma2: Float32[Array, '...']
     sigma_gamma2: Float32[Array, '...']
+    trend_coef: Float32[Array, '...'] | None = None
     cutpoints: Float32[Array, '...'] | None = None
 
 
@@ -88,6 +89,7 @@ class _MCMCCarry(eqx.Module):
     alpha_trace: Float32[Array, '...']
     sigma2_trace: Float32[Array, '...']
     sigma_gamma2_trace: Float32[Array, '...']
+    trend_coef_trace: Float32[Array, '...']
     cutpoints_trace: Float32[Array, '...'] | None
     swap_accepts: Float32[Array, '...'] | None
 
@@ -212,6 +214,9 @@ def _run_inner_batch(
             sigma_gamma2_trace=_set_param(
                 carry_in.sigma_gamma2_trace, main_idx, cold_state.sigma_gamma2, sample_axis
             ),
+            trend_coef_trace=_set_param(
+                carry_in.trend_coef_trace, main_idx, cold_state.trend_coef, sample_axis
+            ),
             cutpoints_trace=(_set_param(carry_in.cutpoints_trace, main_idx,
                                        cold_state.cutpoints, sample_axis)
                              if carry_in.cutpoints_trace is not None else None),
@@ -285,6 +290,9 @@ def run_longbet_mcmc(
         alpha_trace=jnp.zeros((*chains, n_save_i), jnp.float32),
         sigma2_trace=jnp.zeros((*chains, n_save_i), jnp.float32),
         sigma_gamma2_trace=jnp.zeros((*chains, n_save_i), jnp.float32),
+        trend_coef_trace=jnp.zeros(
+            (*chains, n_save_i, state.trend_design.shape[1]), jnp.float32
+        ),
         cutpoints_trace=(jnp.zeros((*chains, n_save_i, state.num_categories - 2), jnp.float32)
                          if state.outcome_type_str == "ordinal" else None),
         swap_accepts=jnp.zeros((state.num_chains,), jnp.float32) if tempered else None,
@@ -311,6 +319,7 @@ def run_longbet_mcmc(
         alpha=carry.alpha_trace,
         sigma2=carry.sigma2_trace,
         sigma_gamma2=carry.sigma_gamma2_trace,
+        trend_coef=carry.trend_coef_trace,
         cutpoints=carry.cutpoints_trace,
     )
     burnin_trace = (

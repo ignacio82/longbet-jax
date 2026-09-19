@@ -165,10 +165,16 @@ def test_split_time_flags_apply_to_their_own_forest():
 
 
 def test_split_calendar_trt_blinds_only_the_treatment_forest():
-    """split_calendar_trt=False removes calendar time from nu and leaves mu alone."""
+    """split_calendar_trt=False removes calendar time from nu and leaves mu alone.
+
+    The block is switched off here on purpose. With it on, the prognostic
+    forest is blinded to calendar time whatever ``split_calendar_trt`` says, so
+    the assertion below would be testing the block rather than the flag.
+    ``test_default_moves_calendar_time_out_of_the_forest`` covers that case.
+    """
     x, y, z, t = _panel()
     model = LongBet(LongBetConfig(num_sweeps=4, num_burnin=2, num_trees_pr=4,
-                                  num_trees_trt=4,
+                                  num_trees_trt=4, use_trend_block=False,
                                   split_calendar_trt=False, num_chains=1, random_seed=1))
     model.fit(y=y, x=x, z=z, t=t)
     by_name = {b.name: b for b in model.design_.blocks}
@@ -182,6 +188,30 @@ def test_split_calendar_trt_blinds_only_the_treatment_forest():
     assert np.all(np.isfinite(pred.tau_summary.mean))
     with pytest.raises(ValueError, match="split_calendar_trt"):
         LongBetConfig(split_calendar_trt=1)
+
+
+def test_default_moves_calendar_time_out_of_the_forest():
+    """Under the shipped defaults the block carries calendar time, not the forest.
+
+    Shipping these two apart is the bug this test exists to catch. The forest
+    blinded with no block is the configuration that scored coverage 0.00; the
+    forest unblinded with the block on is the one that produced NaN draws.
+    """
+    x, y, z, t = _panel()
+    cfg = LongBetConfig(num_sweeps=4, num_burnin=2, num_trees_pr=4,
+                        num_trees_trt=4, num_chains=1, random_seed=1)
+    assert cfg.use_trend_block and cfg.trend_period_effects
+    assert cfg.split_calendar_mu is False
+    model = LongBet(cfg)
+    model.fit(y=y, x=x, z=z, t=t)
+    by_name = {b.name: b for b in model.design_.blocks}
+    assert not by_name["t"].mu_visible, "the block is on, so the forest must be blind to t"
+    assert by_name["t"].nu_visible, "the treatment forest still sees calendar time"
+    # The block has to actually exist, or the forest was blinded for nothing.
+    assert model.state.use_trend_block
+    assert model.state.trend_design.shape[1] > 0
+    assert model.state.trend_num_period > 0, "the common-time factor must be present"
+
 
 
 def test_time_varying_covariates_are_routed_to_their_forest():

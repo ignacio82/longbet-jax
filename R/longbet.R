@@ -78,7 +78,19 @@
 #' @param sigma_m Prior standard deviation of the marginalized constant GP mean.
 #' @param gp_constant_mean Whether the projection reverts to an estimated common
 #'   level rather than to zero.
-#' @param split_time_ps Whether the *prognostic* forest may split on calendar time.
+#' @param trend_num_features Random Fourier features in the unit feature map of
+#'   the calendar-time block. More capacity to represent a trend whose covariate
+#'   loading is nonlinear, at more cost per sweep. The horseshoe prior on the
+#'   block shrinks each column on its own evidence, so raising this is close to
+#'   free statistically; the cost is arithmetic.
+#' @param split_time_ps Whether the *prognostic* forest may split on calendar
+#'   time. `NULL`, the default, derives it: the forest keeps calendar splits only
+#'   when nothing else can carry calendar time. With the calendar-time block on
+#'   (the default) the block carries it, and letting the forest split on time as
+#'   well puts the two in the same subspace, which is what made chains disagree
+#'   about calendar time in the first place. Set it only to reproduce the
+#'   ablation; `FALSE` with the block off is an error, because then nothing
+#'   models calendar time at all.
 #' @param split_calendar_trt Whether the *treatment* forest may split on calendar
 #'   time.
 #' @param split_exposure_trt Whether the *treatment* forest may also split on the
@@ -131,7 +143,8 @@ longbet <- function(y, x, z, t = NULL,
                     num_cutpoints = 100,
                     sig_knl = 1.0, lambda_knl = 1.0, kernel_type = "se",
                     sigma_m = 1.0, gp_constant_mean = TRUE,
-                    split_time_ps = TRUE, split_calendar_trt = TRUE,
+                    trend_num_features = 64,
+                    split_time_ps = NULL, split_calendar_trt = TRUE,
                     split_exposure_trt = FALSE,
                     random_intercept = TRUE,
                     gamma_prior_a = 1.0, gamma_prior_b = 0.1,
@@ -190,7 +203,8 @@ longbet <- function(y, x, z, t = NULL,
     kernel_type = kernel_type,
     sigma_m = as.numeric(sigma_m),
     gp_constant_mean = as.logical(gp_constant_mean),
-    split_time_ps = as.logical(split_time_ps),
+    trend_num_features = as.integer(trend_num_features),
+    split_calendar_mu = if (is.null(split_time_ps)) NULL else as.logical(split_time_ps),
     split_calendar_trt = as.logical(split_calendar_trt),
     split_exposure_trt = as.logical(split_exposure_trt),
     random_intercept = as.logical(random_intercept),

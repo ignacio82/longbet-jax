@@ -157,6 +157,12 @@ def save_npz(
         for key in _FOREST_KEYS:
             arrays[f"{prefix}_{key}"] = np.asarray(getattr(sub, key))
 
+    # The smooth trend block. Written only when the fit had one, so archives of
+    # models fitted without it stay byte-compatible with older readers.
+    trend_coef = getattr(trace, "trend_coef", None)
+    if trend_coef is not None and np.asarray(trend_coef).shape[-1] > 0:
+        arrays["trend_coef"] = np.asarray(trend_coef)
+
     if config.outcome == "ordinal":
         meta.update(ordinal_metadata(config.num_categories, config.cutpoint_prior_scale))
         if trace.cutpoints is None:
@@ -219,10 +225,15 @@ def load_npz(
     sdy = float(meta.pop("sdy", 1.0))
     has_chains = bool(meta.pop("has_chains", np.asarray(data["beta"]).ndim > 2))
 
+    trend_coef = (
+        jnp.asarray(data["trend_coef"]) if "trend_coef" in data.files else None
+    )
+
     trace = LongBetTrace(
         mu_trace=_rebuild_trace(data, "mu", has_chains),
         nu_trace=_rebuild_trace(data, "nu", has_chains),
         **{k: jnp.asarray(data[k]) for k in _PARAM_KEYS},
+        trend_coef=trend_coef,
         cutpoints=None if cutpoints is None else jnp.asarray(cutpoints),
     )
     return trace, config, meany, sdy, meta
