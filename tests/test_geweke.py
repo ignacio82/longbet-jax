@@ -41,6 +41,8 @@ Two different criteria are used, deliberately:
   make.
 """
 
+import inspect
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -53,6 +55,7 @@ from longbet._diagnostics import compute_ess
 from longbet._gp import build_kernel_matrix
 from longbet._state import init_longbet
 from longbet._step import longbet_single_step
+from longbet._x64 import enable_x64
 
 # Proper, informative priors: the reference prior on sigma^2 is improper and has
 # no distribution to compare against.
@@ -129,8 +132,14 @@ def _run_successive_conditional(seed, n_iter=N_ITER, warmup=N_WARMUP, beta_scale
         # A fresh closure: jax.jit caches traces by function identity, and the
         # module-level sweep has already been traced with the real conditional
         # bound in, so re-using it would silently ignore the patch.
-        body = longbet_single_step.__wrapped__
-        sweep = jax.jit(lambda k, s: body(k, s))
+        # Unwrap every layer: the x64 context wrapper sits outside jax.jit,
+        # so a single __wrapped__ would still call the previously cached JIT.
+        body = inspect.unwrap(longbet_single_step)
+
+        @jax.jit
+        @enable_x64(False)
+        def sweep(k, s):
+            return body(k, s)
 
         key = jax.random.key(seed)
         out = {"sigma2": [], "sigma_gamma2": [], "gamma_std": [], "beta_white": []}
