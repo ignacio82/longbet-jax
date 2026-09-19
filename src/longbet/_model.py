@@ -1096,7 +1096,7 @@ class LongBet:
             # Explicit D avoids reshape(-1, 0) for the ordinal binary limit.
             cutpoints = np.asarray(self.trace.cutpoints).reshape(D, K - 2)
 
-        has_gamma = gamma_flat.shape[1] == N
+        has_gamma = self.N_ == N and gamma_flat.shape[1] == N
         if not has_gamma:
             warnings.warn(
                 f"predict() received {N} units but the model was fitted on "

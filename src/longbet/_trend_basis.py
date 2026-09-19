@@ -334,7 +334,8 @@ def apply_unit_features(x_unit: np.ndarray, spec: TrendFeatureSpec) -> np.ndarra
         x = x[:, None]
     xs = (x[:, : spec.num_raw] - spec.mean) / spec.scale
     if spec.omega.shape[1] > 0:
-        rff = np.sqrt(2.0) * np.cos(xs @ spec.omega + spec.phase)
+        proj = np.sum(xs[:, :, None] * spec.omega[None, :, :], axis=1)
+        rff = np.sqrt(2.0) * np.cos(proj + spec.phase)
         B = np.hstack([xs, rff])
     else:
         B = xs
@@ -872,10 +873,14 @@ def evaluate_trend(
         return out
     inter = coef[:, n_period:n_period + d * q]
     C = inter.reshape(inter.shape[0], d, q)
-    # (draws, d, N) then gather cells: avoids forming a (draws, n, q) array,
-    # and reducing over the small degree axis ``d`` per cell makes the result
-    # bit-for-bit independent of ``len(unit_idx)`` (the prediction block size).
-    unit_effect = np.einsum('mdq,nq->mdn', C, features.astype(np.float32))
+    # Reduce over the contiguous feature axis ``q`` in float64 per (draw, degree, unit)
+    # so the result is bit-for-bit independent of both ``len(unit_idx)`` (cell block
+    # size) and ``features.shape[0]`` (unit block size in LongBetEncourage.predict).
+    unit_effect = np.sum(
+        C[:, :, None, :].astype(np.float64)
+        * features.astype(np.float64)[None, None, :, :],
+        axis=-1,
+    ).astype(np.float32)
     phi_t = np.asarray(phi, dtype=np.float32)[time_idx].T[None, :, :]  # (1, d, n)
     out += np.sum(unit_effect[:, :, unit_idx] * phi_t, axis=1)
     return out

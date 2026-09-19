@@ -196,17 +196,20 @@ def _frailty_rule(marginal: bool) -> tuple[np.ndarray, np.ndarray]:
 
 def _predict_quiet(model: LongBet, x: np.ndarray, z: np.ndarray, t: np.ndarray,
                    x_trt: np.ndarray | None = None) -> Any:
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=r"predict\(\) received .* units", category=UserWarning)
-        return model.predict(x, z, t=t, x_trt=x_trt, summary_only=False)
+    saved_n = model.N_
+    try:
+        model.N_ = -1
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=r"predict\(\) received .* units", category=UserWarning)
+            return model.predict(x, z, t=t, x_trt=x_trt, summary_only=False)
+    finally:
+        model.N_ = saved_n
 
 
 def _without_matched_intercepts(model: LongBet, values: np.ndarray, n_units: int) -> np.ndarray:
-    """Remove the fitted unit intercepts ``predict`` attaches when ``N`` matches the fit."""
-    if n_units != model.N_ or not model.config.random_intercept:
-        return values
-    gamma = _flat_draws(model, "gamma")                       # (D, N)
-    return values - gamma.T[:, None, :]
+    """No-op because ``_predict_quiet`` already evaluates without unit intercepts."""
+    del model, n_units
+    return values
 
 
 def adoption_distribution(

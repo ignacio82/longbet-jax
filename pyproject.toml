@@ -39,6 +39,7 @@ dev = [
 packages = ["src/longbet"]
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 testpaths = ["tests"]
 markers = [
     "slow: statistical tests that need long chains (Geweke, coverage, recovery)",

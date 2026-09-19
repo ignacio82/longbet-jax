@@ -8,7 +8,10 @@ import pytest
 from longbet._change_internal_move import change_internal_sweep, tree_log_prior
 from longbet._forest_cache import current_forest_fit
 from longbet._step import longbet_single_step
-from tests.test_change_move import _check_forest, _mu_view, _single_chain_state
+try:
+    from tests.test_change_move import _check_forest, _mu_view, _single_chain_state
+except ImportError:
+    from test_change_move import _check_forest, _mu_view, _single_chain_state
 
 
 def test_sweeps_keep_forests_consistent():
